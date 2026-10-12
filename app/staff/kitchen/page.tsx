@@ -15,6 +15,7 @@ import {
   Loader2,
   CheckCircle2,
   AlertCircle,
+  Check,
 } from 'lucide-react';
 import VegBadge from '@/components/VegBadge';
 import MealIcon from '@/components/MealIcon';
@@ -215,7 +216,28 @@ function StaffKitchenContent() {
     return groups;
   }, [filteredMeals]);
 
+  // Visual feedback state for Select All / Deselect All controls
+  const [actionFeedback, setActionFeedback] = useState<'select' | 'deselect' | null>(null);
+
+  const isAllVisibleSelected = useMemo(() => {
+    if (filteredMeals.length === 0) return false;
+    return filteredMeals.every((m) => selectedMealIds.includes(m.id));
+  }, [filteredMeals, selectedMealIds]);
+
+  const isAllVisibleDeselected = useMemo(() => {
+    if (filteredMeals.length === 0) return true;
+    return filteredMeals.every((m) => !selectedMealIds.includes(m.id));
+  }, [filteredMeals, selectedMealIds]);
+
   const handleSelectAll = () => {
+    if (filteredMeals.length === 0) return;
+    setActionFeedback('select');
+    setTimeout(() => {
+      setActionFeedback((prev) => (prev === 'select' ? null : prev));
+    }, 1200);
+
+    if (isAllVisibleSelected) return;
+
     const visibleIds = filteredMeals.map((m) => m.id);
     const combined = Array.from(new Set([...selectedMealIds, ...visibleIds]));
     setSelectedMealIds(combined);
@@ -223,6 +245,14 @@ function StaffKitchenContent() {
   };
 
   const handleDeselectAll = () => {
+    if (filteredMeals.length === 0) return;
+    setActionFeedback('deselect');
+    setTimeout(() => {
+      setActionFeedback((prev) => (prev === 'deselect' ? null : prev));
+    }, 1200);
+
+    if (isAllVisibleDeselected) return;
+
     const visibleIds = new Set(filteredMeals.map((m) => m.id));
     setSelectedMealIds((prev) => prev.filter((id) => !visibleIds.has(id)));
     showToast('Deselected visible items', 'info');
@@ -495,18 +525,36 @@ function StaffKitchenContent() {
                 <button
                   type="button"
                   onClick={handleSelectAll}
-                  className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-lg transition-colors cursor-pointer text-[11px] flex items-center gap-1"
+                  title={isAllVisibleSelected ? "All visible items are selected" : "Select all visible items"}
+                  className={`min-w-[90px] justify-center px-2.5 py-1 rounded-lg text-[11px] flex items-center gap-1 border transition-all duration-200 active:scale-95 cursor-pointer ${
+                    actionFeedback === 'select'
+                      ? 'bg-emerald-100 text-emerald-800 border-emerald-400 ring-2 ring-emerald-300/60 scale-[0.98] font-black shadow-xs'
+                      : isAllVisibleSelected
+                      ? 'bg-emerald-50 hover:bg-emerald-100/80 text-emerald-800 border-emerald-300 font-extrabold shadow-2xs'
+                      : 'bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-200/60 font-bold hover:text-slate-900'
+                  }`}
                 >
-                  <CheckSquare className="w-3 h-3 text-amber-600" />
-                  <span>Select All</span>
+                  {isAllVisibleSelected || actionFeedback === 'select' ? (
+                    <Check className="w-3 h-3 text-emerald-600 stroke-[2.5] shrink-0" />
+                  ) : (
+                    <CheckSquare className="w-3 h-3 text-amber-600 shrink-0" />
+                  )}
+                  <span>{isAllVisibleSelected ? 'All Selected' : 'Select All'}</span>
                 </button>
                 <button
                   type="button"
                   onClick={handleDeselectAll}
-                  className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-lg transition-colors cursor-pointer text-[11px] flex items-center gap-1"
+                  title={isAllVisibleDeselected ? "All visible items are deselected" : "Deselect all visible items"}
+                  className={`min-w-[100px] justify-center px-2.5 py-1 rounded-lg text-[11px] flex items-center gap-1 border transition-all duration-200 active:scale-95 cursor-pointer ${
+                    actionFeedback === 'deselect'
+                      ? 'bg-slate-200 text-slate-900 border-slate-400 ring-2 ring-slate-300/60 scale-[0.98] font-black shadow-xs'
+                      : isAllVisibleDeselected
+                      ? 'bg-slate-50 text-slate-400 border-slate-200/70 font-medium'
+                      : 'bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-200/60 font-bold hover:text-slate-900'
+                  }`}
                 >
-                  <Square className="w-3 h-3 text-slate-500" />
-                  <span>Deselect All</span>
+                  <Square className={`w-3 h-3 shrink-0 ${isAllVisibleDeselected ? 'text-slate-300' : 'text-slate-500'}`} />
+                  <span>{isAllVisibleDeselected ? 'None Selected' : 'Deselect All'}</span>
                 </button>
               </div>
             </div>

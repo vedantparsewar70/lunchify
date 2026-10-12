@@ -11,7 +11,6 @@ import {
   ArrowRight,
   AlertCircle,
   ArrowLeft,
-  KeyRound,
   UtensilsCrossed,
   GraduationCap,
 } from 'lucide-react';
@@ -39,16 +38,6 @@ function StaffOrAdminLoginForm() {
 
   const { setAuthUser, refreshUser } = useAuth();
   const { showToast } = useToast();
-
-  const handleQuickFill = () => {
-    if (isStaff) {
-      setEmail('staff@school.com');
-      setPassword('Staff123');
-    } else {
-      setEmail('admin@school.com');
-      setPassword('Admin123');
-    }
-  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -130,7 +119,7 @@ function StaffOrAdminLoginForm() {
     <div className={`min-h-[calc(100vh-4rem)] flex flex-col justify-center py-8 sm:py-16 px-4 sm:px-6 lg:px-8 bg-gradient-to-b ${themeColors.bgGradient}`}>
       <div className="sm:mx-auto sm:w-full sm:max-w-md text-center space-y-3">
         {/* Back to Parent Portal Button */}
-        <div className="flex items-center justify-between max-w-md mx-auto mb-2">
+        <div className="flex items-center justify-start max-w-md mx-auto mb-2">
           <Link
             href="/"
             className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-600 hover:text-amber-600 bg-white px-3 py-1.5 rounded-xl border border-slate-200 shadow-2xs hover:border-amber-300 transition-all cursor-pointer"
@@ -138,15 +127,6 @@ function StaffOrAdminLoginForm() {
             <ArrowLeft className="w-3.5 h-3.5" />
             <span>Parent Portal</span>
           </Link>
-
-          <button
-            type="button"
-            onClick={handleQuickFill}
-            className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 px-3 py-1.5 rounded-xl transition-all cursor-pointer"
-          >
-            <KeyRound className="w-3.5 h-3.5 text-slate-500" />
-            <span>Auto-Fill Demo</span>
-          </button>
         </div>
 
         <div className={`inline-flex w-14 h-14 rounded-2xl bg-gradient-to-tr ${themeColors.iconBg} items-center justify-center text-white shadow-lg`}>
