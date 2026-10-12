@@ -108,11 +108,27 @@ export async function GET(req: Request) {
       }
     }
 
-    // Breakdown by Class/Division
+    // Breakdown by Class/Division & Student Category
     const classBreakdownMap = new Map<string, number>();
+    const studentCategoryBreakdown: Record<string, number> = {
+      'Pre-primary': 0,
+      'Primary': 0,
+      'Secondary': 0,
+    };
+
     for (const it of validItems) {
       const key = `Class ${it.student.grade}-${it.student.division}`;
       classBreakdownMap.set(key, (classBreakdownMap.get(key) || 0) + it.quantity);
+
+      const cat =
+        (it.student as any).studentCategory ||
+        (it.student.grade?.toLowerCase().includes('nursery') ||
+        it.student.grade?.toLowerCase().includes('kg')
+          ? 'Pre-primary'
+          : parseInt(it.student.grade, 10) <= 5
+          ? 'Primary'
+          : 'Secondary');
+      studentCategoryBreakdown[cat] = (studentCategoryBreakdown[cat] || 0) + it.quantity;
     }
 
     const studentList = validItems.map((it) => {
@@ -124,11 +140,21 @@ export async function GET(req: Request) {
         });
       }
 
+      const studentCat =
+        (it.student as any).studentCategory ||
+        (it.student.grade?.toLowerCase().includes('nursery') ||
+        it.student.grade?.toLowerCase().includes('kg')
+          ? 'Pre-primary'
+          : parseInt(it.student.grade, 10) <= 5
+          ? 'Primary'
+          : 'Secondary');
+
       return {
         orderItemId: it.id,
         orderId: it.orderId,
         studentName: it.student.name,
         studentId: it.student.studentId,
+        studentCategory: studentCat,
         grade: it.student.grade,
         division: it.student.division,
         rollNo: it.student.rollNo,
@@ -158,6 +184,7 @@ export async function GET(req: Request) {
         classDivision: cls,
         count,
       })),
+      studentCategoryBreakdown,
       studentList,
     };
 

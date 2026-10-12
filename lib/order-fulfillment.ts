@@ -107,9 +107,16 @@ export async function fulfillParentOrder(
 
     // 3. Check and decrement portions atomically
     for (const item of evaluatedCartItems) {
-      const menuDocId = `${item.mealId}_${item.date}`;
-      const menuRef = db.collection('menus').doc(menuDocId);
-      const menuSnap = await transaction.get(menuRef);
+      const catSlug = String((item as any).studentCategory || 'all').toLowerCase().replace(/\s+/g, '_');
+      const categoryMenuDocId = `menu_${item.date}_${catSlug}`;
+      let menuRef = db.collection('menus').doc(categoryMenuDocId);
+      let menuSnap = await transaction.get(menuRef);
+
+      if (!menuSnap.exists) {
+        const legacyDocId = `${item.mealId}_${item.date}`;
+        menuRef = db.collection('menus').doc(legacyDocId);
+        menuSnap = await transaction.get(menuRef);
+      }
 
       if (menuSnap.exists) {
         transaction.update(menuRef, {
@@ -141,6 +148,7 @@ export async function fulfillParentOrder(
         id: itemId,
         orderId,
         studentId: item.studentId,
+        studentCategory: (item as any).studentCategory || null,
         mealId: item.mealId,
         date: item.date,
         quantity: item.quantity,

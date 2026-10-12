@@ -336,7 +336,22 @@ export async function POST(req: Request) {
     const mealsMap = new Map(meals.map((m: any) => [m.id, m]));
 
     // Authoritative Server-side Menu Availability Validation (Single Source of Truth)
-    const availabilityResult = await validateCartAvailability(cartItems);
+    const cartItemsWithCategory = cartItems.map((it) => {
+      const student = parentStudentsMap.get(it.studentId);
+      const studentCategory =
+        student?.studentCategory ||
+        (student?.grade?.toLowerCase().includes('nursery') ||
+        student?.grade?.toLowerCase().includes('kg')
+          ? 'Pre-primary'
+          : parseInt(student?.grade || '1', 10) <= 5
+          ? 'Primary'
+          : 'Secondary');
+      return {
+        ...it,
+        studentCategory,
+      };
+    });
+    const availabilityResult = await validateCartAvailability(cartItemsWithCategory);
     if (!availabilityResult.valid && availabilityResult.firstUnavailableItem) {
       const unavail = availabilityResult.firstUnavailableItem;
       return NextResponse.json(

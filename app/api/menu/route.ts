@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import prisma from '@/lib/prisma';
 import { getTodayString, getOffsetDateString, APP_TIMEZONE, isDeadlinePassed } from '@/lib/utils';
 import { evaluateAllergyConflict, getSystemSetting } from '@/lib/allergy';
+import { getStudentCategory } from '@/lib/october-2026-timetable';
 
 export function clearMenuCache() {
   // Authoritative database querying is always real-time
@@ -14,9 +15,16 @@ export async function GET(req: Request) {
     const startDate = searchParams.get('startDate');
     const endDate = searchParams.get('endDate');
     const childId = searchParams.get('childId');
+    const categoryParam = searchParams.get('category') || searchParams.get('studentCategory');
+    const includeHolidays = searchParams.get('includeHolidays') !== 'false';
 
-    let whereClause: any = { isActive: true };
-    const targetDate = date || (!startDate && !endDate ? getTodayString() : null);
+    let whereClause: any = {};
+    if (!includeHolidays) {
+      whereClause.isActive = true;
+    }
+
+    const todayStr = getTodayString(APP_TIMEZONE);
+    const targetDate = date || (!startDate && !endDate ? todayStr : null);
 
     if (date) {
       whereClause.date = date;
@@ -26,7 +34,7 @@ export async function GET(req: Request) {
         lte: endDate,
       };
     } else {
-      whereClause.date = getTodayString();
+      whereClause.date = todayStr;
     }
 
     const tomorrowStr = getOffsetDateString(1, APP_TIMEZONE);
@@ -41,7 +49,45 @@ export async function GET(req: Request) {
 
     const allowAllergyOrdersSettingPromise = getSystemSetting('ALLOW_ALLERGY_ORDERS', 'true');
 
-    // Authoritative real-time query (no stale in-memory cache)
+    // Optimize: Fetch child allergies and student category
+    let studentAllergiesList: string[] = [];
+    let studentName = '';
+    let derivedStudentCategory: string | null = null;
+    if (childId) {
+      const student = await prisma.student.findUnique({
+        where: { id: childId },
+        include: {
+          studentAllergies: { include: { allergy: true } },
+        },
+      });
+      if (student) {
+        studentName = student.name;
+        derivedStudentCategory = getStudentCategory(student.grade, (student as any).studentCategory);
+        if (student.studentAllergies && student.studentAllergies.length > 0) {
+          student.studentAllergies.forEach((sa: any) => {
+            if (sa.allergy?.name) studentAllergiesList.push(sa.allergy.name);
+            if (sa.customNote) studentAllergiesList.push(sa.customNote);
+          });
+        }
+        if (student.allergies) {
+          student.allergies.split(/[,;]/).forEach((part: string) => {
+            const clean = part.trim();
+            if (clean && !studentAllergiesList.includes(clean)) {
+              studentAllergiesList.push(clean);
+            }
+          });
+        }
+      }
+    }
+
+    const filterCategory = categoryParam || derivedStudentCategory;
+    if (filterCategory) {
+      whereClause.studentCategory = {
+        in: [filterCategory, 'ALL'],
+      };
+    }
+
+    // Authoritative real-time query
     const menus = await prisma.menu.findMany({
       where: whereClause,
       include: {
@@ -63,39 +109,19 @@ export async function GET(req: Request) {
     const allowAllergyOrdersSetting = await allowAllergyOrdersSettingPromise;
     const allowAllergyOrders = allowAllergyOrdersSetting === 'true';
 
-    // Optimize: Fetch child allergies ONCE instead of re-fetching in a loop per meal!
-    let studentAllergiesList: string[] = [];
-    let studentName = '';
-    if (childId) {
-      const student = await prisma.student.findUnique({
-        where: { id: childId },
-        include: {
-          studentAllergies: { include: { allergy: true } },
-        },
-      });
-      if (student) {
-        studentName = student.name;
-        if (student.studentAllergies && student.studentAllergies.length > 0) {
-          student.studentAllergies.forEach((sa: any) => {
-            if (sa.allergy?.name) studentAllergiesList.push(sa.allergy.name);
-            if (sa.customNote) studentAllergiesList.push(sa.customNote);
-          });
-        }
-        if (student.allergies) {
-          student.allergies.split(/[,;]/).forEach((part: string) => {
-            const clean = part.trim();
-            if (clean && !studentAllergiesList.includes(clean)) {
-              studentAllergiesList.push(clean);
-            }
-          });
-        }
-      }
-    }
-
     const evaluatedMenus = menus.map((item) => {
-      const allergensList = (item.meal.mealAllergens || []).map((ma: any) => ma.allergen?.name).filter(Boolean);
-      if (item.meal.allergens && allergensList.length === 0) {
-        item.meal.allergens.split(/[,;]/).forEach((p: string) => {
+      const mealObj = item.meal || {
+        id: item.mealId,
+        name: (item as any).holidayReason || 'Holiday — No Brunch',
+        description: (item as any).holidayReason || 'School closed for brunch',
+        category: 'LUNCH',
+        price: 0,
+        isVegetarian: true,
+      };
+
+      const allergensList = ((mealObj as any).mealAllergens || []).map((ma: any) => ma.allergen?.name).filter(Boolean);
+      if ((mealObj as any).allergens && allergensList.length === 0) {
+        (mealObj as any).allergens.split(/[,;]/).forEach((p: string) => {
           const t = p.trim();
           if (t && !allergensList.includes(t)) allergensList.push(t);
         });
@@ -105,28 +131,34 @@ export async function GET(req: Request) {
         hasConflict: false,
         matchingAllergens: [] as string[],
         childName: studentName || undefined,
-        mealName: item.meal.name,
+        mealName: mealObj.name,
       };
 
       if (childId && studentAllergiesList.length > 0) {
-        const conflictRes = evaluateAllergyConflict(studentAllergiesList, allergensList, studentName, item.meal.name);
+        const conflictRes = evaluateAllergyConflict(studentAllergiesList, allergensList, studentName, mealObj.name);
         allergyEvaluation = {
           hasConflict: conflictRes.hasConflict,
           matchingAllergens: conflictRes.matchingAllergens,
           childName: studentName || undefined,
-          mealName: item.meal.name,
+          mealName: mealObj.name,
         };
       }
 
-      const deadlinePassed = isDeadlinePassed(item.date, item.orderingDeadline || '08:30');
-      const isAvailable = Boolean(item.isActive) && (item.availableQuantity > 0) && !deadlinePassed;
+      const isHoliday = Boolean((item as any).isHoliday);
+      const isPastDate = item.date < todayStr;
+      const deadlinePassed = isPastDate || isDeadlinePassed(item.date, item.orderingDeadline || '08:30');
+      const isAvailable = Boolean(item.isActive) && !isHoliday && !isPastDate && (item.availableQuantity > 0) && !deadlinePassed;
 
       return {
         ...item,
+        studentCategory: (item as any).studentCategory || 'ALL',
+        isHoliday,
+        holidayReason: (item as any).holidayReason || null,
+        isPastDate,
         isAvailable,
         isDeadlinePassed: deadlinePassed,
         meal: {
-          ...item.meal,
+          ...mealObj,
           allergensList,
           imageUrl: null, // No photo
         },

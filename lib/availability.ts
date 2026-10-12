@@ -138,8 +138,37 @@ export async function validateCartAvailability(
       continue;
     }
 
-    const menuKey = `${item.mealId}__${item.date}`;
-    const menuRecord = menuRecordsMap.get(menuKey);
+    const normalizeCat = (cat?: string) => {
+      if (!cat || cat === 'ALL') return 'ALL';
+      const c = String(cat).toLowerCase();
+      if (c.includes('pre')) return 'Pre-primary';
+      if (c.includes('sec')) return 'Secondary';
+      if (c.includes('pri')) return 'Primary';
+      return cat;
+    };
+
+    const itemCat = normalizeCat((item as any).studentCategory);
+    // Strictly match category-specific menu or universal 'ALL' menu record
+    const menuRecord = menuRecords.find((m: any) => {
+      if (m.mealId !== item.mealId || m.date !== item.date) return false;
+      const mCat = normalizeCat(m.studentCategory);
+      return mCat === 'ALL' || itemCat === 'ALL' || mCat === itemCat;
+    });
+
+    if (menuRecord?.isHoliday) {
+      itemResults.push({
+        mealId: item.mealId,
+        date: item.date,
+        mealName,
+        isAvailable: false,
+        isActive: false,
+        isDeadlinePassed: false,
+        availableQuantity: 0,
+        serverPrice,
+        reason: menuRecord.holidayReason ? `${menuRecord.holidayReason} — No Brunch.` : 'Holiday — No Brunch.',
+      });
+      continue;
+    }
 
     if (!menuRecord || !menuRecord.isActive) {
       itemResults.push({
@@ -151,7 +180,7 @@ export async function validateCartAvailability(
         isDeadlinePassed: false,
         availableQuantity: menuRecord?.availableQuantity ?? 0,
         serverPrice,
-        reason: 'It may have been disabled by canteen staff.',
+        reason: 'This dish is not available for this date/category.',
       });
       continue;
     }

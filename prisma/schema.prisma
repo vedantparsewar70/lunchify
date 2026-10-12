@@ -41,6 +41,7 @@ model Student {
   division            String           // Division, e.g. "A"
   rollNo              String
   studentId           String           @unique // e.g. "STU-2026-081"
+  studentCategory     String?          // e.g. "Pre-primary", "Primary", "Secondary"
   allergies           String?          // e.g. "Peanuts, Dairy" (legacy string kept for quick display)
   dietaryRestrictions String?         // e.g. "No outside food", "Halal", "Gluten-free"
   foodPreference      String?          // e.g. "Vegetarian", "Jain", "Vegan"
@@ -114,6 +115,9 @@ model Menu {
   mealId           String
   meal             Meal     @relation(fields: [mealId], references: [id], onDelete: Cascade)
   date             String   // "YYYY-MM-DD"
+  studentCategory  String   @default("ALL") // "Pre-primary" | "Primary" | "Secondary" | "ALL"
+  isHoliday        Boolean  @default(false)
+  holidayReason    String?  // e.g. "Mahatma Gandhi Jayanti Holiday", "Dasara Holiday"
   availableQuantity Int     @default(50)
   maxQuantity      Int      @default(50)
   orderingDeadline String   @default("08:30") // Cutoff time "HH:mm" on that date or previous day
@@ -121,7 +125,7 @@ model Menu {
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 
-  @@unique([mealId, date])
+  @@unique([mealId, date, studentCategory])
 }
 
 model Order {

@@ -45,3 +45,7 @@ next-env.d.ts
 firebase-service-account.json
 firebase-admin-key.json
 
+# Database Backups
+*backup*.json
+prisma/*backup*.json
+

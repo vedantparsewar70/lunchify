@@ -9,14 +9,20 @@ export async function GET(req: Request) {
   try {
     const { searchParams } = new URL(req.url);
     const date = searchParams.get('date');
+    const category = searchParams.get('category') || searchParams.get('studentCategory');
     const tomorrowStr = getOffsetDateString(1, APP_TIMEZONE);
 
     if (!date || date === tomorrowStr) {
       await ensureTomorrowMenuReset(tomorrowStr);
     }
 
+    let whereClause: any = date ? { date } : {};
+    if (category && category !== 'ALL') {
+      whereClause.studentCategory = { in: [category, 'ALL'] };
+    }
+
     const menus = await prisma.menu.findMany({
-      where: date ? { date } : {},
+      where: whereClause,
       include: { meal: true },
       orderBy: [{ date: 'desc' }, { meal: { name: 'asc' } }],
     });

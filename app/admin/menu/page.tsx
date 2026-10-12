@@ -27,6 +27,9 @@ export default function AdminMenuPage() {
   const { showToast } = useToast();
   const [todayDate, setTodayDate] = useState(() => getTodayString());
   const [tomorrowDate, setTomorrowDate] = useState(() => getOffsetDateString(1));
+  const [selectedDate, setSelectedDate] = useState(() => getOffsetDateString(1));
+  const [selectedStudentCategory, setSelectedStudentCategory] = useState<string>('ALL');
+  const [currentDayMenus, setCurrentDayMenus] = useState<any[]>([]);
 
   const [meals, setMeals] = useState<MealData[]>([]);
   const [selectedMealIds, setSelectedMealIds] = useState<string[]>([]);
@@ -44,12 +47,15 @@ export default function AdminMenuPage() {
   const [newMealDesc, setNewMealDesc] = useState('');
   const [creatingMeal, setCreatingMeal] = useState(false);
 
-  const fetchData = async (targetDate?: string) => {
-    const queryDate = targetDate || tomorrowDate;
+  const fetchData = async (targetDate?: string, targetCategory?: string) => {
+    const queryDate = targetDate || selectedDate;
+    const queryCat = targetCategory !== undefined ? targetCategory : selectedStudentCategory;
+    setLoading(true);
     try {
+      const catParam = queryCat && queryCat !== 'ALL' ? `&category=${encodeURIComponent(queryCat)}` : '';
       const [mealsRes, menusRes] = await Promise.all([
         fetch('/api/admin/meals'),
-        fetch(`/api/admin/menus?date=${queryDate}`),
+        fetch(`/api/admin/menus?date=${queryDate}${catParam}`),
       ]);
 
       let allMeals: MealData[] = [];
@@ -61,18 +67,11 @@ export default function AdminMenuPage() {
 
       if (menusRes.ok) {
         const menuData = await menusRes.json();
-        const todayStart = new Date();
-        todayStart.setHours(0, 0, 0, 0);
+        const menusList = menuData.menus || [];
+        setCurrentDayMenus(menusList);
 
-        const activeIds = (menuData.menus || [])
-          .filter((item: any) => {
-            if (!item.isActive) return false;
-            if (item.updatedAt) {
-              const updatedTime = new Date(item.updatedAt).getTime();
-              return updatedTime >= todayStart.getTime();
-            }
-            return false;
-          })
+        const activeIds = menusList
+          .filter((item: any) => Boolean(item.isActive))
           .map((item: any) => item.mealId);
 
         setSelectedMealIds(activeIds);
@@ -87,7 +86,7 @@ export default function AdminMenuPage() {
 
   useEffect(() => {
     fetchData();
-  }, []);
+  }, [selectedDate, selectedStudentCategory]);
 
   useSyncWatcher({
     onMenuUpdate: () => {
@@ -173,7 +172,8 @@ export default function AdminMenuPage() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          date: tomorrowDate,
+          date: selectedDate,
+          studentCategory: selectedStudentCategory,
           selectedMealIds,
         }),
       });
@@ -181,7 +181,7 @@ export default function AdminMenuPage() {
       if (res.ok) {
         broadcastSyncEvent('MENU_UPDATED');
         showToast(
-          `Tomorrow's menu successfully published with ${selectedMealIds.length} items!`,
+          `Menu for ${formatDatePretty(selectedDate)} saved successfully with ${selectedMealIds.length} items!`,
           'success'
         );
       } else {
@@ -241,6 +241,8 @@ export default function AdminMenuPage() {
     return matchesSearch && matchesCategory;
   });
 
+  const holidayItem = currentDayMenus.find((m) => m.isHoliday);
+
   if (loading) {
     return (
       <div className="min-h-[70vh] flex items-center justify-center">
@@ -256,19 +258,19 @@ export default function AdminMenuPage() {
         <div>
           <div className="flex items-center gap-2 mb-1">
             <span className="px-2.5 py-0.5 text-[11px] font-extrabold uppercase tracking-wider bg-purple-100 text-purple-700 rounded-md">
-              Daily Menu Availability
+              Daily Menu Availability & Timetable
             </span>
             <span className="text-xs font-bold text-slate-500 flex items-center gap-1">
               <Calendar className="w-3.5 h-3.5 text-purple-600" />
-              <span>Tomorrow: {formatDatePretty(tomorrowDate)}</span>
+              <span>{formatDatePretty(selectedDate)}</span>
             </span>
           </div>
 
           <h1 className="text-2xl sm:text-3xl font-extrabold text-slate-900 tracking-tight flex items-center gap-2.5">
-            <span>Tomorrow&apos;s Menu</span>
+            <span>Menu & Timetable Manager</span>
           </h1>
           <p className="text-xs sm:text-sm text-slate-500 mt-0.5">
-            Select which dishes will be prepared and available for parents to pre-order tomorrow.
+            Manage daily dishes and verify October 2026 timetable items across student categories.
           </p>
         </div>
 
@@ -292,17 +294,94 @@ export default function AdminMenuPage() {
             {saving ? (
               <>
                 <Loader2 className="w-4 h-4 animate-spin" />
-                <span>Publishing...</span>
+                <span>Saving...</span>
               </>
             ) : (
               <>
                 <Save className="w-4 h-4" />
-                <span>Save & Publish Menu ({selectedMealIds.length})</span>
+                <span>Save Menu ({selectedMealIds.length})</span>
               </>
             )}
           </button>
         </div>
       </div>
+
+      {/* Date & Student Category Selector Bar */}
+      <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-2xs space-y-3">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          {/* Quick Date Buttons */}
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-xs font-bold text-slate-500">Date:</span>
+            <button
+              type="button"
+              onClick={() => setSelectedDate(tomorrowDate)}
+              className={`px-3 py-1.5 rounded-xl text-xs font-extrabold transition-all cursor-pointer ${
+                selectedDate === tomorrowDate
+                  ? 'bg-purple-600 text-white shadow-xs'
+                  : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+              }`}
+            >
+              Tomorrow ({formatDatePretty(tomorrowDate).split(',')[0]})
+            </button>
+            <button
+              type="button"
+              onClick={() => setSelectedDate(todayDate)}
+              className={`px-3 py-1.5 rounded-xl text-xs font-extrabold transition-all cursor-pointer ${
+                selectedDate === todayDate
+                  ? 'bg-purple-600 text-white shadow-xs'
+                  : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+              }`}
+            >
+              Today ({formatDatePretty(todayDate).split(',')[0]})
+            </button>
+            <input
+              type="date"
+              value={selectedDate}
+              min="2026-10-01"
+              max="2026-10-31"
+              onChange={(e) => setSelectedDate(e.target.value)}
+              className="text-xs font-bold text-slate-800 bg-slate-50 border border-slate-200 rounded-xl px-2.5 py-1.5 focus:outline-hidden"
+            />
+          </div>
+
+          {/* Student Category Filter */}
+          <div className="flex items-center gap-1.5 overflow-x-auto pb-1 sm:pb-0">
+            <span className="text-xs font-bold text-slate-500">Category:</span>
+            {[
+              { id: 'ALL', label: 'All Students' },
+              { id: 'PRE_PRIMARY', label: 'Pre-primary' },
+              { id: 'PRIMARY', label: 'Primary' },
+              { id: 'SECONDARY', label: 'Secondary' },
+            ].map((cat) => (
+              <button
+                key={cat.id}
+                type="button"
+                onClick={() => setSelectedStudentCategory(cat.id)}
+                className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all shrink-0 cursor-pointer ${
+                  selectedStudentCategory === cat.id
+                    ? 'bg-purple-600 text-white shadow-xs'
+                    : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                }`}
+              >
+                {cat.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Holiday Alert if Applicable */}
+      {holidayItem && (
+        <div className="bg-purple-100/80 border border-purple-300 rounded-2xl p-4 flex items-center gap-3 text-purple-950">
+          <AlertCircle className="w-5 h-5 text-purple-600 shrink-0" />
+          <div>
+            <h4 className="font-extrabold text-sm">Holiday — No Brunch</h4>
+            <p className="text-xs text-purple-800 mt-0.5">
+              {holidayItem.holidayReason || 'School Holiday'} is recorded for {formatDatePretty(selectedDate)}.
+            </p>
+          </div>
+        </div>
+      )}
 
       {/* Published Status Pill Banner */}
       <div className="bg-purple-50/70 border border-purple-200/80 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
@@ -312,10 +391,10 @@ export default function AdminMenuPage() {
           </div>
           <div>
             <p className="font-extrabold text-purple-950">
-              {selectedMealIds.length} Food Items Selected for Tomorrow
+              {selectedMealIds.length} Food Items Active for {formatDatePretty(selectedDate)}
             </p>
             <p className="text-[11px] text-purple-800">
-              Only checked items will be visible on the parent pre-ordering screen for {formatDatePretty(tomorrowDate)}.
+              Only checked items are orderable for {selectedStudentCategory === 'ALL' ? 'all categories' : selectedStudentCategory}.
             </p>
           </div>
         </div>

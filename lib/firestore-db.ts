@@ -48,6 +48,7 @@ export interface DbStudent {
   division: string;
   rollNo: string;
   studentId: string;
+  studentCategory?: string | null;
   allergies?: string | null;
   dietaryRestrictions?: string | null;
   foodPreference?: string | null;
@@ -97,6 +98,9 @@ export interface DbMenu {
   mealId: string;
   meal: DbMeal;
   date: string;
+  studentCategory?: string;
+  isHoliday?: boolean;
+  holidayReason?: string | null;
   availableQuantity: number;
   maxQuantity: number;
   orderingDeadline: string;
@@ -927,7 +931,32 @@ export class FirestoreDbAdapter {
         } else if (where.date?.in && Array.isArray(where.date.in)) {
           const dateSet = new Set(where.date.in);
           list = list.filter((m: any) => dateSet.has(m.date));
+        } else if (typeof where.date === 'object') {
+          if (where.date.gte) {
+            list = list.filter((m: any) => m.date >= where.date.gte);
+          }
+          if (where.date.lte) {
+            list = list.filter((m: any) => m.date <= where.date.lte);
+          }
         }
+      }
+
+      if (where?.studentCategory) {
+        if (typeof where.studentCategory === 'string') {
+          list = list.filter(
+            (m: any) =>
+              !m.studentCategory ||
+              m.studentCategory === 'ALL' ||
+              m.studentCategory === where.studentCategory
+          );
+        } else if (where.studentCategory?.in && Array.isArray(where.studentCategory.in)) {
+          const catSet = new Set([...where.studentCategory.in, 'ALL']);
+          list = list.filter((m: any) => !m.studentCategory || catSet.has(m.studentCategory));
+        }
+      }
+
+      if (where?.isHoliday !== undefined) {
+        list = list.filter((m: any) => Boolean(m.isHoliday) === Boolean(where.isHoliday));
       }
 
       if (where?.mealId) {
@@ -989,6 +1018,22 @@ export class FirestoreDbAdapter {
       if (where.id) {
         const snap = await db.collection('menus').doc(where.id).get();
         doc = docData(snap);
+      } else if (where.mealId_date_studentCategory) {
+        const { mealId, date, studentCategory } = where.mealId_date_studentCategory;
+        const directId = `menu_${date}_${String(studentCategory || 'all').toLowerCase().replace(/\s+/g, '_')}`;
+        const snap = await db.collection('menus').doc(directId).get();
+        if (snap.exists) {
+          doc = docData(snap);
+        } else {
+          const qSnap = await db
+            .collection('menus')
+            .where('mealId', '==', mealId)
+            .where('date', '==', date)
+            .where('studentCategory', '==', studentCategory)
+            .limit(1)
+            .get();
+          if (!qSnap.empty) doc = docData(qSnap.docs[0]);
+        }
       } else if (where.mealId_date) {
         const directId = `${where.mealId_date.mealId}_${where.mealId_date.date}`;
         const snap = await db.collection('menus').doc(directId).get();
@@ -1015,13 +1060,26 @@ export class FirestoreDbAdapter {
       let query: Query = db.collection('menus');
       if (where.mealId) query = query.where('mealId', '==', where.mealId);
       if (where.date) query = query.where('date', '==', where.date);
+      if (where.studentCategory) query = query.where('studentCategory', '==', where.studentCategory);
       const snap = await query.limit(1).get();
       if (snap.empty) return null;
       return docData(snap.docs[0]);
     },
     upsert: async ({ where, create, update }: any): Promise<DbMenu> => {
-      const mealId = where.mealId_date?.mealId || create.mealId;
-      const date = where.mealId_date?.date || create.date;
+      const mealId =
+        where.mealId_date_studentCategory?.mealId ||
+        where.mealId_date?.mealId ||
+        create.mealId;
+      const date =
+        where.mealId_date_studentCategory?.date ||
+        where.mealId_date?.date ||
+        create.date;
+      const studentCategory =
+        where.mealId_date_studentCategory?.studentCategory ||
+        create.studentCategory ||
+        update.studentCategory ||
+        'ALL';
+
       let ref: DocumentReference;
       let docExists = false;
 
@@ -1029,8 +1087,28 @@ export class FirestoreDbAdapter {
         ref = db.collection('menus').doc(where.id);
         const snap = await ref.get();
         docExists = snap.exists;
+      } else if (where.mealId_date_studentCategory) {
+        const docId = `menu_${date}_${String(studentCategory).toLowerCase().replace(/\s+/g, '_')}`;
+        ref = db.collection('menus').doc(docId);
+        const snap = await ref.get();
+        if (snap.exists) {
+          docExists = true;
+        } else {
+          const qSnap = await db
+            .collection('menus')
+            .where('mealId', '==', mealId)
+            .where('date', '==', date)
+            .where('studentCategory', '==', studentCategory)
+            .limit(1)
+            .get();
+          if (!qSnap.empty) {
+            ref = qSnap.docs[0].ref;
+            docExists = true;
+          }
+        }
       } else if (where.mealId_date) {
-        const qSnap = await db.collection('menus')
+        const qSnap = await db
+          .collection('menus')
           .where('mealId', '==', where.mealId_date.mealId)
           .where('date', '==', where.mealId_date.date)
           .limit(1)
@@ -1053,7 +1131,15 @@ export class FirestoreDbAdapter {
         await ref.set({ ...update, updatedAt: now }, { merge: true });
       } else {
         const newId = ref.id;
-        await ref.set({ id: newId, mealId, date, ...create, createdAt: now, updatedAt: now });
+        await ref.set({
+          id: newId,
+          mealId,
+          date,
+          studentCategory,
+          ...create,
+          createdAt: now,
+          updatedAt: now,
+        });
       }
       return docData(await ref.get());
     },

@@ -247,9 +247,20 @@ export default function ChildrenPage() {
                       </div>
                     </div>
 
-                    <span className="px-2.5 py-1 text-[10px] font-bold bg-amber-100 text-amber-800 rounded-full">
-                      Class {child.grade}-{child.division}
-                    </span>
+                    <div className="flex flex-col items-end gap-1">
+                      <span className={`px-2 py-0.5 text-[9px] font-black uppercase tracking-wider rounded-md border ${
+                        (child.studentCategory === 'Pre-primary' || child.grade?.toLowerCase().includes('nursery') || child.grade?.toLowerCase().includes('kg'))
+                          ? 'bg-purple-50 text-purple-800 border-purple-200'
+                          : (child.studentCategory === 'Secondary' || parseInt(child.grade, 10) > 5)
+                          ? 'bg-amber-50 text-amber-800 border-amber-200'
+                          : 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                      }`}>
+                        {child.studentCategory || (child.grade?.toLowerCase().includes('nursery') || child.grade?.toLowerCase().includes('kg') ? 'Pre-primary' : parseInt(child.grade, 10) <= 5 ? 'Primary' : 'Secondary')}
+                      </span>
+                      <span className="px-2 py-0.5 text-[10px] font-bold bg-slate-100 text-slate-700 rounded-md">
+                        {child.grade?.toLowerCase().includes('kg') || child.grade?.toLowerCase().includes('nursery') ? child.grade : `Class ${child.grade}`}-{child.division}
+                      </span>
+                    </div>
                   </div>
 
                   {/* Details Grid */}
@@ -369,12 +380,22 @@ export default function ChildrenPage() {
                     onChange={(e) => setFormGrade(e.target.value)}
                     className="w-full px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-900"
                   >
-                    <option value="" disabled>Select Class (e.g. Class 5)</option>
-                    {['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12'].map((g) => (
-                      <option key={g} value={g}>
-                        Class {g}
-                      </option>
-                    ))}
+                    <option value="" disabled>Select Class</option>
+                    <optgroup label="Pre-primary (Nursery & KG)">
+                      <option value="Nursery">Nursery</option>
+                      <option value="Jr. KG">Jr. KG</option>
+                      <option value="Sr. KG">Sr. KG</option>
+                    </optgroup>
+                    <optgroup label="Primary (Classes 1 - 5)">
+                      {['1', '2', '3', '4', '5'].map((g) => (
+                        <option key={g} value={g}>Class {g}</option>
+                      ))}
+                    </optgroup>
+                    <optgroup label="Secondary (Classes 6 - 12)">
+                      {['6', '7', '8', '9', '10', '11', '12'].map((g) => (
+                        <option key={g} value={g}>Class {g}</option>
+                      ))}
+                    </optgroup>
                   </select>
                 </div>
 

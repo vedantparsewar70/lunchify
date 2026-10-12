@@ -47,6 +47,17 @@ export async function GET() {
         allergyAlertStatus = 'ALLERGY_RECORDED';
       }
 
+      const resolvedGrade = s.grade || '';
+      const category =
+        (s as any).studentCategory ||
+        (resolvedGrade.toLowerCase().includes('nursery') ||
+        resolvedGrade.toLowerCase().includes('kg') ||
+        resolvedGrade.toLowerCase().includes('pre')
+          ? 'Pre-primary'
+          : parseInt(resolvedGrade, 10) <= 5
+          ? 'Primary'
+          : 'Secondary');
+
       return {
         id: s.id,
         parentId: s.parentId,
@@ -56,6 +67,7 @@ export async function GET() {
         division: s.division,
         rollNo: s.rollNo,
         studentId: s.studentId,
+        studentCategory: category,
         allergies: allergiesList.join(', ') || s.allergies || null,
         allergiesList,
         dietaryRestrictions: s.dietaryRestrictions || null,
@@ -120,16 +132,27 @@ export async function POST(req: Request) {
     }
 
     const allergiesSummary = finalAllergies.join(', ');
+    const resolvedGrade = String(grade).trim();
+    const studentCategory =
+      data.studentCategory ||
+      (resolvedGrade.toLowerCase().includes('nursery') ||
+      resolvedGrade.toLowerCase().includes('kg') ||
+      resolvedGrade.toLowerCase().includes('pre')
+        ? 'Pre-primary'
+        : parseInt(resolvedGrade, 10) <= 5
+        ? 'Primary'
+        : 'Secondary');
 
     const newStudent = await prisma.student.create({
       data: {
         parentId: user.parentId,
         name: name.trim(),
         dob: dob || null,
-        grade: String(grade).trim(),
+        grade: resolvedGrade,
         division: String(division).trim().toUpperCase(),
         rollNo: String(rollNo).trim(),
         studentId: generatedStudentId,
+        studentCategory,
         allergies: allergiesSummary || null,
         dietaryRestrictions: dietaryRestrictions?.trim() || null,
         foodPreference: foodPreference?.trim() || (isVegetarian !== false ? 'Vegetarian' : 'Non-Vegetarian'),
@@ -238,6 +261,17 @@ export async function PUT(req: Request) {
         grade: grade ? String(grade).trim() : student.grade,
         division: division ? String(division).trim().toUpperCase() : student.division,
         rollNo: rollNo ? String(rollNo).trim() : student.rollNo,
+        studentCategory: data.studentCategory !== undefined
+          ? data.studentCategory
+          : grade
+          ? (String(grade).toLowerCase().includes('nursery') ||
+             String(grade).toLowerCase().includes('kg') ||
+             String(grade).toLowerCase().includes('pre')
+              ? 'Pre-primary'
+              : parseInt(String(grade), 10) <= 5
+              ? 'Primary'
+              : 'Secondary')
+          : (student as any).studentCategory,
         allergies: allergiesSummary || null,
         dietaryRestrictions: dietaryRestrictions !== undefined ? dietaryRestrictions?.trim() : student.dietaryRestrictions,
         foodPreference: foodPreference !== undefined ? foodPreference?.trim() : student.foodPreference,

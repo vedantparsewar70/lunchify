@@ -29,6 +29,9 @@ function StaffKitchenContent() {
   const { showToast } = useToast();
   const [todayDateStr, setTodayDateStr] = useState(() => getTodayString());
   const [tomorrowDateStr, setTomorrowDateStr] = useState(() => getOffsetDateString(1));
+  const [selectedDateStr, setSelectedDateStr] = useState(() => getOffsetDateString(1));
+  const [selectedStudentCategory, setSelectedStudentCategory] = useState<string>('ALL');
+  const [currentDayMenus, setCurrentDayMenus] = useState<any[]>([]);
 
   // --- Tomorrow's Complete Menu State ---
   const [allMeals, setAllMeals] = useState<MealData[]>([]);
@@ -63,14 +66,16 @@ function StaffKitchenContent() {
   const [editMealIsVeg, setEditMealIsVeg] = useState(true);
   const [updatingMeal, setUpdatingMeal] = useState(false);
 
-  // Fetch Tomorrow's Complete Master Menu & Active Schedule
-  const fetchTomorrowMenuData = async (targetDate?: string) => {
-    const queryDate = targetDate || tomorrowDateStr;
+  // Fetch Complete Master Menu & Active Schedule for selected date & category
+  const fetchTomorrowMenuData = async (targetDate?: string, targetCategory?: string) => {
+    const queryDate = targetDate || selectedDateStr;
+    const queryCat = targetCategory !== undefined ? targetCategory : selectedStudentCategory;
     setLoadingTomorrow(true);
     try {
+      const catParam = queryCat && queryCat !== 'ALL' ? `&category=${encodeURIComponent(queryCat)}` : '';
       const [mealsRes, menusRes] = await Promise.all([
         fetch('/api/admin/meals'),
-        fetch(`/api/admin/menus?date=${queryDate}`),
+        fetch(`/api/admin/menus?date=${queryDate}${catParam}`),
       ]);
 
       if (mealsRes.ok) {
@@ -80,8 +85,10 @@ function StaffKitchenContent() {
 
       if (menusRes.ok) {
         const menuData = await menusRes.json();
-        // Server's ensureTomorrowMenuReset already ensures tomorrow's menu is reset unless published today
-        const activeIds = (menuData.menus || [])
+        const menusList = menuData.menus || [];
+        setCurrentDayMenus(menusList);
+
+        const activeIds = menusList
           .filter((item: any) => Boolean(item.isActive))
           .map((item: any) => item.mealId);
 
@@ -89,7 +96,7 @@ function StaffKitchenContent() {
         setInitialSavedMealIds(activeIds);
       }
     } catch (err) {
-      console.error('Failed to load tomorrow menu data:', err);
+      console.error('Failed to load menu data:', err);
       showToast('Error loading menu items', 'error');
     } finally {
       setLoadingTomorrow(false);
@@ -98,7 +105,7 @@ function StaffKitchenContent() {
 
   useEffect(() => {
     fetchTomorrowMenuData();
-  }, []);
+  }, [selectedDateStr, selectedStudentCategory]);
 
   // Live real-time synchronization across staff and parents without manual refresh
   useSyncWatcher({
@@ -258,7 +265,7 @@ function StaffKitchenContent() {
     showToast('Deselected visible items', 'info');
   };
 
-  // Save Tomorrow's Menu
+  // Save Menu
   const handleSaveTomorrowMenu = async () => {
     setSavingTomorrow(true);
     try {
@@ -266,7 +273,8 @@ function StaffKitchenContent() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          date: tomorrowDateStr,
+          date: selectedDateStr,
+          studentCategory: selectedStudentCategory,
           selectedMealIds,
         }),
       });
@@ -275,7 +283,7 @@ function StaffKitchenContent() {
         setInitialSavedMealIds([...selectedMealIds]);
         broadcastSyncEvent('MENU_UPDATED');
         showToast(
-          `Tomorrow's menu saved! ${selectedMealIds.length} items will be available for parents.`,
+          `Menu for ${formatDatePretty(selectedDateStr)} saved! ${selectedMealIds.length} items will be available for parents.`,
           'success'
         );
       } else {
@@ -464,7 +472,7 @@ function StaffKitchenContent() {
               <div>
                 <div className="flex items-center gap-2">
                   <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">
-                    Tomorrow&apos;s Menu
+                    Menu Timetable & Availability
                   </span>
                   {hasUnsavedChanges ? (
                     <span className="text-[10px] font-extrabold bg-amber-100 text-amber-900 border border-amber-300 px-2 py-0.5 rounded-full flex items-center gap-1">
@@ -479,12 +487,12 @@ function StaffKitchenContent() {
                   )}
                 </div>
                 <h3 className="text-lg font-black text-slate-900 mt-0.5">
-                  {formatDatePretty(tomorrowDateStr)}
+                  {formatDatePretty(selectedDateStr)}
                 </h3>
                 <p className="text-xs text-slate-500 mt-0.5 font-medium">
                   <strong className="text-amber-600 font-bold">{selectedMealIds.length}</strong> of{' '}
                   <strong className="text-slate-800">{allMeals.length}</strong> items available for
-                  parents to order.
+                  parents to order ({selectedStudentCategory === 'ALL' ? 'All Categories' : selectedStudentCategory}).
                 </p>
               </div>
 
@@ -503,7 +511,7 @@ function StaffKitchenContent() {
                   type="button"
                   onClick={handleSaveTomorrowMenu}
                   disabled={savingTomorrow || !hasUnsavedChanges}
-                  title={!hasUnsavedChanges ? "No changes to save" : "Save tomorrow's menu"}
+                  title={!hasUnsavedChanges ? "No changes to save" : "Save menu for this date"}
                   className="px-4 py-2 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-white rounded-xl text-xs font-black transition-all flex items-center gap-1.5 shadow-sm disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:from-amber-500 disabled:hover:to-orange-500 disabled:shadow-none"
                 >
                   {savingTomorrow ? (
@@ -511,10 +519,84 @@ function StaffKitchenContent() {
                   ) : (
                     <Save className="w-3.5 h-3.5" />
                   )}
-                  <span>Save Tomorrow&apos;s Menu</span>
+                  <span>Save Menu</span>
                 </button>
               </div>
             </div>
+
+            {/* Date and Category Selector Controls */}
+            <div className="pt-2 border-t border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="font-bold text-slate-500 text-[11px]">Date:</span>
+                <button
+                  type="button"
+                  onClick={() => setSelectedDateStr(tomorrowDateStr)}
+                  className={`px-2.5 py-1 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                    selectedDateStr === tomorrowDateStr
+                      ? 'bg-amber-500 text-white shadow-xs'
+                      : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                  }`}
+                >
+                  Tomorrow
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSelectedDateStr(todayDateStr)}
+                  className={`px-2.5 py-1 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                    selectedDateStr === todayDateStr
+                      ? 'bg-amber-500 text-white shadow-xs'
+                      : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                  }`}
+                >
+                  Today
+                </button>
+                <input
+                  type="date"
+                  value={selectedDateStr}
+                  min="2026-10-01"
+                  max="2026-10-31"
+                  onChange={(e) => setSelectedDateStr(e.target.value)}
+                  className="text-xs font-bold text-slate-800 bg-slate-50 border border-slate-200 rounded-xl px-2.5 py-1 focus:outline-hidden"
+                />
+              </div>
+
+              {/* Student Category Selector */}
+              <div className="flex items-center gap-1.5 overflow-x-auto pb-1 sm:pb-0">
+                <span className="font-bold text-slate-500 text-[11px]">Category:</span>
+                {[
+                  { id: 'ALL', label: 'All' },
+                  { id: 'PRE_PRIMARY', label: 'Pre-primary' },
+                  { id: 'PRIMARY', label: 'Primary' },
+                  { id: 'SECONDARY', label: 'Secondary' },
+                ].map((cat) => (
+                  <button
+                    key={cat.id}
+                    type="button"
+                    onClick={() => setSelectedStudentCategory(cat.id)}
+                    className={`px-2.5 py-1 rounded-xl text-xs font-bold transition-all shrink-0 cursor-pointer ${
+                      selectedStudentCategory === cat.id
+                        ? 'bg-amber-500 text-white shadow-xs'
+                        : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                    }`}
+                  >
+                    {cat.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Holiday Notice if Present */}
+            {currentDayMenus.some((m) => m.isHoliday) && (
+              <div className="bg-purple-100/90 border border-purple-300 rounded-xl p-3 flex items-center gap-2.5 text-purple-950 text-xs">
+                <AlertCircle className="w-4 h-4 text-purple-600 shrink-0" />
+                <div>
+                  <span className="font-black">Holiday — No Brunch:</span>{' '}
+                  <span>
+                    {currentDayMenus.find((m) => m.isHoliday)?.holidayReason || 'School Holiday'}
+                  </span>
+                </div>
+              </div>
+            )}
 
             {/* Quick Select All / Deselect All Controls */}
             <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-xs">

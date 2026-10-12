@@ -12,58 +12,67 @@ export async function POST(req: Request) {
     }
 
     const body = await req.json();
-    const { date, selectedMealIds } = body;
+    const { date, selectedMealIds, category, studentCategory } = body;
+    const targetCategory = studentCategory || category;
 
     if (!date || !Array.isArray(selectedMealIds)) {
       return NextResponse.json({ error: 'Date and selectedMealIds array are required' }, { status: 400 });
     }
 
-    // 1. Fetch all existing menus for this date
-    const existingMenus = await prisma.menu.findMany({
-      where: { date },
-    });
+    // 1. Fetch existing menus for this date (optionally filtered by studentCategory)
+    let whereClause: any = { date };
+    if (targetCategory && targetCategory !== 'ALL') {
+      whereClause.studentCategory = targetCategory;
+    }
 
-    const existingMealIdMap = new Map(existingMenus.map((m: any) => [m.mealId, m]));
+    const existingMenus = await prisma.menu.findMany({
+      where: whereClause,
+    });
 
     const now = new Date().toISOString();
 
-    // 2. Concurrently enable selected meals & disable unselected meals
-    const enablePromises = selectedMealIds.map((mealId: string) => {
-      const existing = existingMealIdMap.get(mealId);
-      if (existing) {
-        return prisma.menu.update({
-          where: { id: existing.id },
-          data: { isActive: true, updatedAt: now },
-        });
-      } else {
-        return prisma.menu.upsert({
-          where: {
-            mealId_date: { mealId, date },
-          },
-          update: { isActive: true, updatedAt: now },
-          create: {
-            mealId,
-            date,
-            availableQuantity: 50,
-            maxQuantity: 50,
-            orderingDeadline: '08:30',
-            isActive: true,
-            updatedAt: now,
-          },
-        });
+    // 2. Enable selected meals & disable unselected meals
+    const updatePromises: Promise<any>[] = [];
+
+    // Enable existing menus that match selectedMealIds
+    for (const item of existingMenus) {
+      const shouldBeActive = selectedMealIds.includes(item.mealId);
+      if (item.isActive !== shouldBeActive) {
+        updatePromises.push(
+          prisma.menu.update({
+            where: { id: item.id },
+            data: { isActive: shouldBeActive, updatedAt: now },
+          })
+        );
       }
-    });
+    }
 
-    const disablePromises = existingMenus
-      .filter((existing: any) => !selectedMealIds.includes(existing.mealId))
-      .map((existing: any) =>
-        prisma.menu.update({
-          where: { id: existing.id },
-          data: { isActive: false, updatedAt: now },
-        })
-      );
+    // If any selectedMealId does not exist at all in existingMenus, create it
+    const existingMealIds = new Set(existingMenus.map((m: any) => m.mealId));
+    for (const mealId of selectedMealIds) {
+      if (!existingMealIds.has(mealId)) {
+        updatePromises.push(
+          prisma.menu.upsert({
+            where: {
+              mealId_date: { mealId, date },
+            },
+            update: { isActive: true, updatedAt: now },
+            create: {
+              mealId,
+              date,
+              studentCategory: (targetCategory && targetCategory !== 'ALL') ? targetCategory : 'ALL',
+              availableQuantity: 50,
+              maxQuantity: 50,
+              orderingDeadline: '08:30',
+              isActive: true,
+              updatedAt: now,
+            },
+          })
+        );
+      }
+    }
 
-    await Promise.all([...enablePromises, ...disablePromises]);
+    await Promise.all(updatePromises);
 
     // Record authoritative publication in menu_publishes collection
     try {

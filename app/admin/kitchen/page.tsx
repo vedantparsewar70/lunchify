@@ -170,7 +170,27 @@ function KitchenPageContent() {
             </div>
 
             {/* Production Summary Cards - Large, readable numbers for mobile kitchen staff */}
-            <div className="p-4 sm:p-6">
+            <div className="p-4 sm:p-6 space-y-4">
+              {/* Category Breakdown Badges */}
+              {kitchenData?.studentCategoryBreakdown && (
+                <div className="flex flex-wrap items-center gap-3 p-3 bg-amber-50/70 border border-amber-200/80 rounded-2xl">
+                  <span className="text-[11px] font-black uppercase text-amber-900 tracking-wider">
+                    Category Breakdown:
+                  </span>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="px-2.5 py-1 bg-white border border-amber-200 text-amber-900 rounded-xl text-xs font-bold shadow-2xs">
+                      Pre-primary: <strong className="text-amber-600">{kitchenData.studentCategoryBreakdown.PRE_PRIMARY || 0}</strong>
+                    </span>
+                    <span className="px-2.5 py-1 bg-white border border-amber-200 text-amber-900 rounded-xl text-xs font-bold shadow-2xs">
+                      Primary: <strong className="text-amber-600">{kitchenData.studentCategoryBreakdown.PRIMARY || 0}</strong>
+                    </span>
+                    <span className="px-2.5 py-1 bg-white border border-amber-200 text-amber-900 rounded-xl text-xs font-bold shadow-2xs">
+                      Secondary: <strong className="text-amber-600">{kitchenData.studentCategoryBreakdown.SECONDARY || 0}</strong>
+                    </span>
+                  </div>
+                </div>
+              )}
+
               {(!kitchenData?.mealCounts || kitchenData.mealCounts.length === 0) ? (
                 <div className="py-12 text-center text-slate-400 space-y-2">
                   <UtensilsCrossed className="w-10 h-10 mx-auto text-slate-300" />

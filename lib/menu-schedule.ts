@@ -70,8 +70,9 @@ export async function ensureTomorrowMenuReset(targetTomorrowDate?: string): Prom
 
   let deactivatedCount = 0;
 
-  // If tomorrow's menu was NOT saved on today's cycle, ensure all records for tomorrow are inactive
-  if (!isPublishedToday) {
+  // If tomorrow's menu was NOT saved on today's cycle and is not an official timetable date, ensure inactive
+  const isOfficialOctoberDate = tomorrowStr.startsWith('2026-10-');
+  if (!isPublishedToday && !isOfficialOctoberDate) {
     try {
       const snap = await db.collection('menus')
         .where('date', '==', tomorrowStr)

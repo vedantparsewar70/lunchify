@@ -13,6 +13,8 @@ export interface UserSession {
   parentId?: string;
 }
 
+export type StudentCategory = 'Pre-primary' | 'Primary' | 'Secondary';
+
 export interface StudentData {
   id: string;
   parentId: string;
@@ -22,6 +24,7 @@ export interface StudentData {
   division: string;
   rollNo: string;
   studentId: string;
+  studentCategory?: StudentCategory;
   allergies?: string | null;
   allergiesList?: string[];
   dietaryRestrictions?: string | null;
@@ -37,7 +40,7 @@ export interface MealData {
   id: string;
   name: string;
   description: string;
-  category: string; // BREAKFAST, LUNCH, SNACK, BEVERAGE
+  category: string; // BREAKFAST, LUNCH, SNACK, BEVERAGE, BRUNCH
   isVegetarian: boolean;
   ingredients?: string | null;
   allergens?: string | null;
@@ -52,10 +55,16 @@ export interface MenuDayItem {
   mealId: string;
   meal: MealData;
   date: string;
+  studentCategory?: string;
+  isHoliday?: boolean;
+  holidayReason?: string;
   availableQuantity: number;
   maxQuantity: number;
   orderingDeadline: string;
   isActive: boolean;
+  isAvailable?: boolean;
+  isDeadlinePassed?: boolean;
+  isPastDate?: boolean;
 }
 
 export interface CartItem {
@@ -64,6 +73,7 @@ export interface CartItem {
   studentName: string;
   studentGrade: string;
   studentDivision: string;
+  studentCategory?: string;
   mealId: string;
   mealName: string;
   mealPrice: number;
@@ -84,6 +94,7 @@ export interface OrderItemData {
   studentGrade: string;
   studentDivision: string;
   studentRollNo: string;
+  studentCategory?: string;
   mealId: string;
   mealName: string;
   mealCategory: string;

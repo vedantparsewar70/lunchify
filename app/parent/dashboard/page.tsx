@@ -36,16 +36,27 @@ export default function ParentDashboard() {
   const [orders, setOrders] = useState<any[]>([]);
   const [todayMenu, setTodayMenu] = useState<MenuDayItem[]>([]);
   const [dataLoading, setDataLoading] = useState(true);
+  const [selectedChildId, setSelectedChildId] = useState<string>('');
 
   const todayStr = getTodayString();
+
+  // Set default child once loaded
+  useEffect(() => {
+    if (childrenList.length > 0 && !selectedChildId) {
+      setSelectedChildId(childrenList[0].id);
+    }
+  }, [childrenList, selectedChildId]);
 
   const loadDashboardData = async (isBackground = false) => {
     if (!isBackground) setDataLoading(true);
     try {
-      // Query recent 20 orders and today's menu in parallel (children already provided by auth context)
+      const menuUrl = selectedChildId
+        ? `/api/menu?date=${todayStr}&childId=${encodeURIComponent(selectedChildId)}`
+        : `/api/menu?date=${todayStr}`;
+
       const [ordersRes, menuRes] = await Promise.all([
         fetch('/api/parent/orders?limit=20', { cache: 'no-store' }),
-        fetch(`/api/menu?date=${todayStr}`, { cache: 'no-store' }),
+        fetch(menuUrl, { cache: 'no-store' }),
       ]);
 
       if (ordersRes.ok) {
@@ -66,7 +77,7 @@ export default function ParentDashboard() {
 
   useEffect(() => {
     loadDashboardData();
-  }, [todayStr]);
+  }, [todayStr, selectedChildId]);
 
   // Live real-time synchronization for parent dashboard without manual page refresh
   useSyncWatcher({
@@ -276,33 +287,90 @@ export default function ParentDashboard() {
         )}
       </div>
 
+      {/* October 2026 Timetable Spotlight Banner */}
+      <div className="bg-gradient-to-r from-amber-500/10 via-orange-500/10 to-amber-500/10 border border-amber-300/60 rounded-3xl p-5 sm:p-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div className="flex items-start gap-3.5">
+          <div className="w-12 h-12 rounded-2xl bg-amber-500 text-white flex items-center justify-center shrink-0 shadow-md shadow-amber-500/20">
+            <Calendar className="w-6 h-6" />
+          </div>
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] font-black uppercase tracking-wider bg-amber-500 text-white px-2 py-0.5 rounded-md">
+                Official Timetable
+              </span>
+              <span className="text-xs font-bold text-slate-500">October 2026</span>
+            </div>
+            <h3 className="text-base sm:text-lg font-black text-slate-900 mt-0.5">
+              October 2026 School Brunch Menu
+            </h3>
+            <p className="text-xs text-slate-600 mt-0.5 max-w-xl">
+              Category-tailored nutritious meals for <strong>Pre-primary</strong>, <strong>Primary</strong>, and <strong>Secondary</strong> students across all 31 days.
+            </p>
+          </div>
+        </div>
+        <Link
+          href="/parent/menu"
+          className="px-5 py-2.5 bg-amber-600 hover:bg-amber-700 text-white text-xs sm:text-sm font-extrabold rounded-xl shadow-md transition-all flex items-center justify-center gap-2 shrink-0 cursor-pointer"
+        >
+          <span>View October Timetable</span>
+          <ArrowRight className="w-4 h-4" />
+        </Link>
+      </div>
+
       {/* Main Grid: Today's Menu Preview & Recent Orders */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
         {/* Left: Today's Menu */}
         <div className="lg:col-span-7 space-y-4">
-          <div className="flex items-center justify-between">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
             <div>
               <h2 className="text-lg font-extrabold text-slate-900">Today's Lunch Menu</h2>
-              <p className="text-xs text-slate-500">Available fresh at the school canteen today</p>
+              <p className="text-xs text-slate-500">
+                Fresh timetable items for {formatDatePretty(todayStr)}
+              </p>
             </div>
             <Link
               href="/parent/menu"
               className="text-xs font-bold text-amber-600 hover:text-amber-700 flex items-center gap-1"
             >
-              Full Menu <ArrowRight className="w-3.5 h-3.5" />
+              Full October Menu <ArrowRight className="w-3.5 h-3.5" />
             </Link>
           </div>
 
+          {/* Child Category Tabs if multiple children */}
+          {childrenList.length > 1 && (
+            <div className="flex items-center gap-2 overflow-x-auto pb-1">
+              <span className="text-[11px] font-bold text-slate-400">Viewing for:</span>
+              {childrenList.map((c) => (
+                <button
+                  key={c.id}
+                  type="button"
+                  onClick={() => setSelectedChildId(c.id)}
+                  className={`px-3 py-1 rounded-xl text-xs font-bold transition-all shrink-0 cursor-pointer ${
+                    selectedChildId === c.id
+                      ? 'bg-amber-500 text-white shadow-xs'
+                      : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-50'
+                  }`}
+                >
+                  {c.name.split(' ')[0]} ({c.studentCategory?.replace('_', '-') || 'Class ' + c.grade})
+                </button>
+              ))}
+            </div>
+          )}
+
           {todayMenu.length === 0 ? (
             <div className="bg-white rounded-3xl p-8 border border-slate-100 text-center text-xs text-slate-500">
-              No menu items scheduled for today yet. Check the weekly menu calendar.
+              No menu items scheduled for today. Check the full October menu calendar.
             </div>
           ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               {todayMenu.slice(0, 4).map((menuItem) => (
                 <div
                   key={menuItem.id}
-                  className="bg-white rounded-2xl p-4 border border-slate-200/80 shadow-xs hover:shadow-md transition-all flex flex-col justify-between gap-3"
+                  className={`bg-white rounded-2xl p-4 border shadow-xs hover:shadow-md transition-all flex flex-col justify-between gap-3 ${
+                    menuItem.isHoliday
+                      ? 'border-purple-200 bg-purple-50/20'
+                      : 'border-slate-200/80'
+                  }`}
                 >
                   <div className="flex items-start gap-3">
                     <MealIcon
@@ -312,27 +380,48 @@ export default function ParentDashboard() {
                       className="shrink-0"
                     />
                     <div className="flex-1 min-w-0 space-y-1">
-                      <MealCategoryBadge category={menuItem.meal.category} size="sm" />
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <MealCategoryBadge category={menuItem.meal.category} size="sm" />
+                        {menuItem.studentCategory && (
+                          <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-md bg-slate-100 text-slate-600">
+                            {menuItem.studentCategory.replace('_', '-')}
+                          </span>
+                        )}
+                      </div>
                       <h4 className="font-extrabold text-slate-900 text-sm leading-tight truncate">
                         {menuItem.meal.name}
                       </h4>
-                      <p className="text-xs font-black text-amber-600">
-                        {formatINR(menuItem.meal.price)}
-                      </p>
+                      {!menuItem.isHoliday && (
+                        <p className="text-xs font-black text-amber-600">
+                          {formatINR(menuItem.meal.price)}
+                        </p>
+                      )}
                     </div>
                   </div>
 
                   <div className="flex items-center justify-between pt-2 border-t border-slate-100 text-xs">
-                    <span className="text-[11px] font-semibold text-emerald-700 flex items-center gap-1">
-                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
-                      Available ({menuItem.availableQuantity} left)
-                    </span>
-                    <Link
-                      href={`/parent/menu?date=${todayStr}`}
-                      className="px-3 py-1 bg-amber-500 hover:bg-amber-600 text-white text-xs font-bold rounded-xl shadow-xs transition-colors"
-                    >
-                      Select
-                    </Link>
+                    {menuItem.isHoliday ? (
+                      <span className="text-[11px] font-black text-purple-700 bg-purple-100/80 px-2.5 py-1 rounded-lg">
+                        Holiday — No Brunch {menuItem.holidayReason ? `(${menuItem.holidayReason})` : ''}
+                      </span>
+                    ) : menuItem.isPastDate ? (
+                      <span className="text-[11px] font-semibold text-slate-400">
+                        Past Date • Closed
+                      </span>
+                    ) : (
+                      <>
+                        <span className="text-[11px] font-semibold text-emerald-700 flex items-center gap-1">
+                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
+                          Available
+                        </span>
+                        <Link
+                          href={`/parent/menu?date=${todayStr}${selectedChildId ? `&childId=${selectedChildId}` : ''}`}
+                          className="px-3 py-1 bg-amber-500 hover:bg-amber-600 text-white text-xs font-bold rounded-xl shadow-xs transition-colors"
+                        >
+                          Select
+                        </Link>
+                      </>
+                    )}
                   </div>
                 </div>
               ))}
