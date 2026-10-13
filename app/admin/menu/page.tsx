@@ -61,7 +61,9 @@ export default function AdminMenuPage() {
       let allMeals: MealData[] = [];
       if (mealsRes.ok) {
         const m = await mealsRes.json();
-        allMeals = m.meals || [];
+        allMeals = (m.meals || []).filter(
+          (meal: any) => meal.id !== 'meal_holiday_no_brunch' && !meal.name.toLowerCase().includes('holiday')
+        );
         setMeals(allMeals);
       }
 
@@ -375,7 +377,7 @@ export default function AdminMenuPage() {
         <div className="bg-purple-100/80 border border-purple-300 rounded-2xl p-4 flex items-center gap-3 text-purple-950">
           <AlertCircle className="w-5 h-5 text-purple-600 shrink-0" />
           <div>
-            <h4 className="font-extrabold text-sm">Holiday — No Brunch</h4>
+            <h4 className="font-extrabold text-sm">Holiday Today — No Brunch Scheduled</h4>
             <p className="text-xs text-purple-800 mt-0.5">
               {holidayItem.holidayReason || 'School Holiday'} is recorded for {formatDatePretty(selectedDate)}.
             </p>

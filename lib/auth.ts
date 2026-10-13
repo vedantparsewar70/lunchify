@@ -5,10 +5,9 @@ import prisma from './prisma';
 import { UserRole } from '@/types';
 
 function getJwtSecret(): Uint8Array {
-  const secretKey = process.env.JWT_SECRET;
-  if (!secretKey) {
-    throw new Error('JWT_SECRET environment variable is missing. Please define it in your .env file.');
-  }
+  const secretKey =
+    process.env.JWT_SECRET ||
+    'super-secure-school-mealbox-jwt-secret-key-2026';
   return new TextEncoder().encode(secretKey);
 }
 

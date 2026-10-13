@@ -80,7 +80,7 @@ async function applyOctober2026Menu() {
   console.log(`   ✅ Removed ${oldMealsSnap.size} obsolete meal catalog records.\n`);
 
   // STEP 3: INSERT THE OFFICIAL OCTOBER 2026 MEAL CATALOG
-  console.log('🍲 Step 3: Populating official October 2026 meal catalog (24 brunch dishes + holiday entry)...');
+  console.log('🍲 Step 3: Populating official October 2026 meal catalog (24 brunch dishes)...');
   const now = new Date().toISOString();
 
   for (const meal of OCTOBER_2026_MEAL_CATALOG) {
@@ -137,13 +137,13 @@ async function applyOctober2026Menu() {
       const isHoliday = Boolean(catMenu.isHoliday);
       const isOrderable = !isPastDate && !isHoliday;
 
-      if (!isHoliday && mealId !== 'meal_holiday_no_brunch') {
+      if (!isHoliday && mealId) {
         dateSelectedMeals.push(mealId);
       }
 
       const menuData = {
         id: docId,
-        mealId,
+        mealId: isHoliday ? '' : mealId,
         date: dayEntry.date,
         studentCategory: category,
         isHoliday,

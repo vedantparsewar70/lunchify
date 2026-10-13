@@ -307,18 +307,6 @@ export const OCTOBER_2026_MEAL_CATALOG: MealCatalogItem[] = [
     ingredients: 'Whole wheat parathas stuffed with veggies, fresh home curd, yellow moong dal khichdi',
     calories: 480,
   },
-  // Relational placeholder for school holidays
-  {
-    id: 'meal_holiday_no_brunch',
-    name: 'Holiday — No Brunch',
-    description: 'School canteen closed for brunch due to official holiday / weekend.',
-    category: 'BRUNCH',
-    price: 0,
-    isVegetarian: true,
-    allergens: '',
-    ingredients: 'None (Holiday)',
-    calories: 0,
-  },
 ];
 
 export const OCTOBER_2026_TIMETABLE: TimetableDayEntry[] = [
@@ -643,7 +631,7 @@ export function getMealIdForDish(dishName: string): string {
   const clean = dishName.toLowerCase().trim();
   const found = dishNameToMealIdMap.get(clean);
   if (found) return found;
-  if (clean.includes('holiday')) return 'meal_holiday_no_brunch';
+  if (clean.includes('holiday')) return '';
   return 'meal_oct_mix_veg_dal_chapati_rice';
 }
 

@@ -13,24 +13,26 @@ export async function GET() {
       orderBy: { name: 'asc' },
     });
 
-    const formatted = meals.map((m) => {
-      const allergensList = m.mealAllergens.map((ma) => ma.allergen.name);
-      if (m.allergens && allergensList.length === 0) {
-        m.allergens.split(/[,;]/).forEach((p) => {
-          const t = p.trim();
-          if (t && !allergensList.includes(t)) allergensList.push(t);
-        });
-      }
+    const filtered = meals
+      .filter((m) => m.id !== 'meal_holiday_no_brunch' && !m.name.toLowerCase().includes('holiday'))
+      .map((m) => {
+        const allergensList = m.mealAllergens.map((ma) => ma.allergen.name);
+        if (m.allergens && allergensList.length === 0) {
+          m.allergens.split(/[,;]/).forEach((p) => {
+            const t = p.trim();
+            if (t && !allergensList.includes(t)) allergensList.push(t);
+          });
+        }
 
-      return {
-        ...m,
-        allergensList,
-        allergens: allergensList.join(', ') || m.allergens || null,
-        imageUrl: null, // Ensure no photos
-      };
-    });
+        return {
+          ...m,
+          allergensList,
+          allergens: allergensList.join(', ') || m.allergens || null,
+          imageUrl: null, // Ensure no photos
+        };
+      });
 
-    return NextResponse.json({ meals: formatted });
+    return NextResponse.json({ meals: filtered });
   } catch (error) {
     console.error('Error fetching meals:', error);
     return NextResponse.json({ error: 'Failed to fetch meals' }, { status: 500 });

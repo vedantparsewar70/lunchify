@@ -111,9 +111,29 @@ export async function POST(req: Request) {
       isVegetarian,
     } = data;
 
-    if (!name || !grade || !division || !rollNo) {
+    const rawCategory = data.category || data.studentCategory || grade;
+    let studentCategory: 'Pre-primary' | 'Primary' | 'Secondary' | null = null;
+    if (rawCategory) {
+      const clean = String(rawCategory).trim().toLowerCase();
+      if (clean.includes('pre') || clean.includes('nursery') || clean.includes('kg')) {
+        studentCategory = 'Pre-primary';
+      } else if (clean.includes('sec') || parseInt(clean.replace(/\D/g, '') || '0', 10) > 5) {
+        studentCategory = 'Secondary';
+      } else {
+        studentCategory = 'Primary';
+      }
+    }
+
+    if (!name || !String(name).trim()) {
       return NextResponse.json(
-        { error: 'Name, Class, Division, and Roll Number are required' },
+        { error: 'Student full name is required' },
+        { status: 400 }
+      );
+    }
+
+    if (!studentCategory) {
+      return NextResponse.json(
+        { error: 'Class / Category is required (Pre-primary, Primary, or Secondary)' },
         { status: 400 }
       );
     }
@@ -132,25 +152,18 @@ export async function POST(req: Request) {
     }
 
     const allergiesSummary = finalAllergies.join(', ');
-    const resolvedGrade = String(grade).trim();
-    const studentCategory =
-      data.studentCategory ||
-      (resolvedGrade.toLowerCase().includes('nursery') ||
-      resolvedGrade.toLowerCase().includes('kg') ||
-      resolvedGrade.toLowerCase().includes('pre')
-        ? 'Pre-primary'
-        : parseInt(resolvedGrade, 10) <= 5
-        ? 'Primary'
-        : 'Secondary');
+    const resolvedGrade = studentCategory;
+    const resolvedDivision = division ? String(division).trim().toUpperCase() : '-';
+    const resolvedRollNo = rollNo ? String(rollNo).trim() : '-';
 
     const newStudent = await prisma.student.create({
       data: {
         parentId: user.parentId,
-        name: name.trim(),
-        dob: dob || null,
+        name: String(name).trim(),
+        dob: dob ? String(dob).trim() : null,
         grade: resolvedGrade,
-        division: String(division).trim().toUpperCase(),
-        rollNo: String(rollNo).trim(),
+        division: resolvedDivision,
+        rollNo: resolvedRollNo,
         studentId: generatedStudentId,
         studentCategory,
         allergies: allergiesSummary || null,
@@ -253,25 +266,28 @@ export async function PUT(req: Request) {
 
     const allergiesSummary = finalAllergies.join(', ');
 
+    const rawCategory = data.category || data.studentCategory || grade;
+    let studentCategory: 'Pre-primary' | 'Primary' | 'Secondary' | null = null;
+    if (rawCategory) {
+      const clean = String(rawCategory).trim().toLowerCase();
+      if (clean.includes('pre') || clean.includes('nursery') || clean.includes('kg')) {
+        studentCategory = 'Pre-primary';
+      } else if (clean.includes('sec') || parseInt(clean.replace(/\D/g, '') || '0', 10) > 5) {
+        studentCategory = 'Secondary';
+      } else {
+        studentCategory = 'Primary';
+      }
+    }
+
     const updated = await prisma.student.update({
       where: { id },
       data: {
         name: name?.trim() ?? student.name,
-        dob: dob ?? student.dob,
-        grade: grade ? String(grade).trim() : student.grade,
+        dob: dob !== undefined ? (dob ? String(dob).trim() : null) : student.dob,
+        grade: studentCategory || (grade ? String(grade).trim() : student.grade),
         division: division ? String(division).trim().toUpperCase() : student.division,
         rollNo: rollNo ? String(rollNo).trim() : student.rollNo,
-        studentCategory: data.studentCategory !== undefined
-          ? data.studentCategory
-          : grade
-          ? (String(grade).toLowerCase().includes('nursery') ||
-             String(grade).toLowerCase().includes('kg') ||
-             String(grade).toLowerCase().includes('pre')
-              ? 'Pre-primary'
-              : parseInt(String(grade), 10) <= 5
-              ? 'Primary'
-              : 'Secondary')
-          : (student as any).studentCategory,
+        studentCategory: studentCategory || (student as any).studentCategory || 'Primary',
         allergies: allergiesSummary || null,
         dietaryRestrictions: dietaryRestrictions !== undefined ? dietaryRestrictions?.trim() : student.dietaryRestrictions,
         foodPreference: foodPreference !== undefined ? foodPreference?.trim() : student.foodPreference,

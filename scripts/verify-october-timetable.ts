@@ -70,6 +70,17 @@ async function main() {
 
   // 2. Specific Exception Date Verification
   console.log('\n--- 2. Specific Exception Dates Verification ---');
+  // 14/10/2026: All three categories display Plain Rice + Soyabean Masala + Chapati + Salad
+  const oct14 = dateMap.get('2026-10-14')!;
+  assert.strictEqual(oct14.length, 3, 'Oct 14 must have 3 category menus');
+  assert(oct14.every((m) => !m.isHoliday && m.meal?.name === 'Plain Rice + Soyabean Masala + Chapati + Salad'), '14/10/2026: All three categories must have Plain Rice + Soyabean Masala + Chapati + Salad');
+  console.log('✅ 14/10/2026: All three categories display Plain Rice + Soyabean Masala + Chapati + Salad');
+
+  // 20/10/2026: Dasara Holiday - all three categories display holiday notice and no food items
+  const oct20 = dateMap.get('2026-10-20')!;
+  assert(oct20.every((m) => m.isHoliday && !m.meal && m.holidayReason?.includes('Dasara')), '20/10/2026: All three categories must display Dasara holiday notice and no food items');
+  console.log('✅ 20/10/2026: All three categories display Dasara holiday notice and no food items');
+
   // 10/10/2026: Pre-primary Holiday vs Primary/Secondary Veg Hyderabadi
   const oct10 = dateMap.get('2026-10-10')!;
   const oct10PP = oct10.find((m) => m.studentCategory?.toLowerCase().includes('pre'))!;
@@ -83,38 +94,47 @@ async function main() {
   const oct24 = dateMap.get('2026-10-24')!;
   const oct24PP = oct24.find((m) => m.studentCategory?.toLowerCase().includes('pre'))!;
   const oct24Pri = oct24.find((m) => m.studentCategory === 'Primary' || m.studentCategory === 'PRIMARY')!;
-  assert(oct24PP.isHoliday, '24/10/2026 Pre-primary must be holiday');
-  assert(!oct24Pri.isHoliday, '24/10/2026 Primary must NOT be holiday');
-  assert.strictEqual(oct24Pri.meal.name, 'Lauki Chana + Dal + Chapati + Rice + Pickle');
-  console.log('✅ 24/10/2026: Pre-primary Holiday vs Primary/Secondary Lauki Chana verified');
+  const oct24Sec = oct24.find((m) => m.studentCategory === 'Secondary' || m.studentCategory === 'SECONDARY')!;
+  assert(oct24PP.isHoliday && !oct24PP.meal, '24/10/2026 Pre-primary must be holiday notice');
+  assert(!oct24Pri.isHoliday && oct24Pri.meal?.name === 'Lauki Chana + Dal + Chapati + Rice + Pickle');
+  assert(!oct24Sec.isHoliday && oct24Sec.meal?.name === 'Lauki Chana + Dal + Chapati + Rice + Pickle');
+  console.log('✅ 24/10/2026: Pre-primary displays holiday notice; Primary and Secondary display Lauki Chana verified');
 
   // 29/10/2026: Pre-primary Veg Cutlet vs Primary/Secondary Green Moong
   const oct29 = dateMap.get('2026-10-29')!;
   const oct29PP = oct29.find((m) => m.studentCategory?.toLowerCase().includes('pre'))!;
   const oct29Pri = oct29.find((m) => m.studentCategory === 'Primary' || m.studentCategory === 'PRIMARY')!;
-  assert(!oct29PP.isHoliday && !oct29Pri.isHoliday);
-  assert.strictEqual(oct29PP.meal.name, 'Veg Cutlet (Shallow fry) + Banana');
-  assert.strictEqual(oct29Pri.meal.name, 'Green Moong + Dal + Chapati + Rice');
-  console.log('✅ 29/10/2026: Pre-primary Veg Cutlet vs Primary/Secondary Green Moong verified');
+  const oct29Sec = oct29.find((m) => m.studentCategory === 'Secondary' || m.studentCategory === 'SECONDARY')!;
+  assert(!oct29PP.isHoliday && oct29PP.meal?.name === 'Veg Cutlet (Shallow fry) + Banana');
+  assert(!oct29Pri.isHoliday && oct29Pri.meal?.name === 'Green Moong + Dal + Chapati + Rice');
+  assert(!oct29Sec.isHoliday && oct29Sec.meal?.name === 'Green Moong + Dal + Chapati + Rice');
+  console.log('✅ 29/10/2026: Pre-primary Veg Cutlet + Banana; Primary and Secondary Green Moong verified');
 
   // 31/10/2026: Pre-primary Holiday vs Primary/Secondary Mix Veg Paratha
   const oct31 = dateMap.get('2026-10-31')!;
   const oct31PP = oct31.find((m) => m.studentCategory?.toLowerCase().includes('pre'))!;
   const oct31Pri = oct31.find((m) => m.studentCategory === 'Primary' || m.studentCategory === 'PRIMARY')!;
-  assert(oct31PP.isHoliday, '31/10/2026 Pre-primary must be holiday');
-  assert(!oct31Pri.isHoliday, '31/10/2026 Primary must NOT be holiday');
-  assert.strictEqual(oct31Pri.meal.name, 'Mix Veg Paratha + Curd + Dalkhichadi');
-  console.log('✅ 31/10/2026: Pre-primary Holiday vs Primary/Secondary Mix Veg Paratha verified');
+  const oct31Sec = oct31.find((m) => m.studentCategory === 'Secondary' || m.studentCategory === 'SECONDARY')!;
+  assert(oct31PP.isHoliday && !oct31PP.meal, '31/10/2026 Pre-primary must be holiday');
+  assert(!oct31Pri.isHoliday && oct31Pri.meal?.name === 'Mix Veg Paratha + Curd + Dalkhichadi');
+  assert(!oct31Sec.isHoliday && oct31Sec.meal?.name === 'Mix Veg Paratha + Curd + Dalkhichadi');
+  console.log('✅ 31/10/2026: Pre-primary displays holiday notice; Primary and Secondary display Mix Veg Paratha verified');
 
-  // 02/10/2026 (Gandhi Jayanti) & 20/10/2026 (Dasara)
+  // 02/10/2026 (Gandhi Jayanti)
   const oct02 = dateMap.get('2026-10-02')!;
   assert(oct02.every((m) => m.isHoliday), 'All 3 categories must be holiday on Oct 2 Gandhi Jayanti');
-  const oct20 = dateMap.get('2026-10-20')!;
-  assert(oct20.every((m) => m.isHoliday), 'All 3 categories must be holiday on Oct 20 Dasara');
-  console.log('✅ Full School Holidays (Oct 2 Gandhi Jayanti, Oct 20 Dasara) verified');
+  console.log('✅ Full School Holiday (Oct 2 Gandhi Jayanti) verified');
 
-  // 3. User Accounts & Staff/Admin Credentials Check
-  console.log('\n--- 3. Staff & Admin Accounts Verification ---');
+  // 3. Master Recipe Catalog Check: exactly 24 dishes, no holiday item
+  console.log('\n--- 3. Recipe Catalog Structure Check ---');
+  const allDbMeals = await prisma.meal.findMany();
+  const holidayInCatalog = allDbMeals.find((m) => m.id === 'meal_holiday_no_brunch' || m.name.toLowerCase().includes('holiday'));
+  assert(!holidayInCatalog, 'Holiday must NOT be in master recipe catalog');
+  assert.strictEqual(allDbMeals.length, 24, `Expected exactly 24 recipes in catalog, found ${allDbMeals.length}`);
+  console.log(`✅ Master recipe catalog contains exactly ${allDbMeals.length} genuine food recipes and 0 holiday items`);
+
+  // 4. User Accounts & Staff/Admin Credentials Check
+  console.log('\n--- 4. Staff & Admin Accounts Verification ---');
   const adminUser = await prisma.user.findUnique({ where: { email: 'admin@school.com' } });
   const staffUser = await prisma.user.findUnique({ where: { email: 'staff@school.com' } });
   assert(adminUser, 'Admin account (admin@school.com) must exist');
@@ -123,14 +143,13 @@ async function main() {
   assert.strictEqual(staffUser.role, 'STAFF', 'Staff role must be STAFF');
   console.log('✅ Admin (admin@school.com) & Staff (staff@school.com) credentials preserved intact');
 
-  // 4. Cart Availability & Ordering Restrictions Simulation
-  console.log('\n--- 4. Ordering Rules & Validation Simulation ---');
+  // 5. Cart Availability & Ordering Restrictions Simulation
+  console.log('\n--- 5. Ordering Rules & Validation Simulation ---');
   // Finding meal ID for Mix Sprout
   const mixSproutMenu = allOctMenus.find((m) => m.date === '2026-10-21' && m.studentCategory?.toLowerCase() === 'primary')!;
-  const holidayMenu = allOctMenus.find((m) => m.date === '2026-10-20' && m.studentCategory?.toLowerCase() === 'primary')!;
   const pastMenu = allOctMenus.find((m) => m.date === '2026-10-05' && m.studentCategory?.toLowerCase() === 'primary')!;
 
-  // 4a. Future valid order
+  // 5a. Future valid order
   const validCart = [
     {
       mealId: mixSproutMenu.mealId,
@@ -147,16 +166,16 @@ async function main() {
   assert(validRes.valid, `Expected future valid order to pass, got error: ${validRes.errorMessage}`);
   console.log('✅ Valid future meal order successfully approved');
 
-  // 4b. Ordering on Holiday rejected
+  // 5b. Ordering on Dasara Holiday (2026-10-20) rejected even if valid meal ID provided
   const holidayCart = [
     {
-      mealId: holidayMenu.mealId,
+      mealId: mixSproutMenu.mealId,
       date: '2026-10-20',
       quantity: 1,
       studentId: 'student-primary-1',
       studentName: 'Aarav Patel',
-      mealName: 'Dasara Holiday',
-      mealPrice: 0,
+      mealName: 'Mix Sprout + Dal + Chapati + Rice',
+      mealPrice: 80,
       studentCategory: 'PRIMARY',
     },
   ];
@@ -165,7 +184,25 @@ async function main() {
   assert(holidayRes.errorMessage?.toLowerCase().includes('holiday') || holidayRes.errorMessage?.toLowerCase().includes('brunch'), `Error message must mention holiday, got: ${holidayRes.errorMessage}`);
   console.log(`✅ Holiday order correctly rejected with: "${holidayRes.errorMessage}"`);
 
-  // 4c. Ordering on Past Date rejected
+  // 5c. Ordering on category-specific holiday (Oct 24 Pre-primary is holiday) rejected
+  const oct24LaukiMenu = allOctMenus.find((m) => m.date === '2026-10-24' && m.studentCategory === 'Primary')!;
+  const categoryHolidayCart = [
+    {
+      mealId: oct24LaukiMenu.mealId,
+      date: '2026-10-24',
+      quantity: 1,
+      studentId: 'student-pp-1',
+      studentName: 'Little Aarav',
+      mealName: 'Lauki Chana + Dal + Chapati + Rice + Pickle',
+      mealPrice: 80,
+      studentCategory: 'Pre-primary',
+    },
+  ];
+  const catHolidayRes = await validateCartAvailability(categoryHolidayCart as any);
+  assert(!catHolidayRes.valid, 'Ordering on category holiday must be rejected');
+  console.log(`✅ Category-specific holiday order correctly rejected with: "${catHolidayRes.errorMessage}"`);
+
+  // 5d. Ordering on Past Date rejected
   const pastCart = [
     {
       mealId: pastMenu.mealId,
@@ -183,7 +220,7 @@ async function main() {
   assert(pastRes.errorMessage?.toLowerCase().includes('past'), `Error message must mention past date, got: ${pastRes.errorMessage}`);
   console.log(`✅ Past date order correctly rejected with: "${pastRes.errorMessage}"`);
 
-  // 4d. Cross-category ordering rejected (e.g. Veg Cutlet is Pre-primary only on Oct 29)
+  // 5e. Cross-category ordering rejected (e.g. Veg Cutlet is Pre-primary only on Oct 29)
   const vegCutletMenu = allOctMenus.find((m) => m.date === '2026-10-29' && m.studentCategory?.toLowerCase().includes('pre'))!;
   const crossCatCart = [
     {
@@ -201,7 +238,7 @@ async function main() {
   assert(!crossCatRes.valid, 'Cross-category ordering must be rejected');
   console.log(`✅ Cross-category order correctly rejected with: "${crossCatRes.errorMessage}"`);
 
-  console.log('\n🎉 ALL 4 VERIFICATION SUITE CHECKS COMPLETED AND PASSED PERFECTLY!\n');
+  console.log('\n🎉 ALL VERIFICATION SUITE CHECKS COMPLETED AND PASSED PERFECTLY!\n');
 }
 
 main()

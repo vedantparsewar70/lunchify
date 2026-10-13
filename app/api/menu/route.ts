@@ -110,12 +110,36 @@ export async function GET(req: Request) {
     const allowAllergyOrders = allowAllergyOrdersSetting === 'true';
 
     const evaluatedMenus = menus.map((item) => {
+      const isHoliday = Boolean((item as any).isHoliday);
+      const isPastDate = item.date < todayStr;
+      const deadlinePassed = isPastDate || isDeadlinePassed(item.date, item.orderingDeadline || '08:30');
+      const isAvailable = Boolean(item.isActive) && !isHoliday && !isPastDate && (item.availableQuantity > 0) && !deadlinePassed;
+
+      if (isHoliday) {
+        return {
+          ...item,
+          studentCategory: (item as any).studentCategory || 'ALL',
+          isHoliday: true,
+          holidayReason: (item as any).holidayReason || 'Holiday Today — No Brunch Scheduled',
+          isPastDate,
+          isAvailable: false,
+          isDeadlinePassed: deadlinePassed,
+          meal: null,
+          allergyEvaluation: {
+            hasConflict: false,
+            matchingAllergens: [],
+            childName: studentName || undefined,
+            mealName: 'Holiday',
+          },
+        };
+      }
+
       const mealObj = item.meal || {
         id: item.mealId,
-        name: (item as any).holidayReason || 'Holiday — No Brunch',
-        description: (item as any).holidayReason || 'School closed for brunch',
+        name: 'Scheduled Brunch',
+        description: 'Freshly prepared wholesome school brunch.',
         category: 'LUNCH',
-        price: 0,
+        price: 80,
         isVegetarian: true,
       };
 
@@ -144,16 +168,11 @@ export async function GET(req: Request) {
         };
       }
 
-      const isHoliday = Boolean((item as any).isHoliday);
-      const isPastDate = item.date < todayStr;
-      const deadlinePassed = isPastDate || isDeadlinePassed(item.date, item.orderingDeadline || '08:30');
-      const isAvailable = Boolean(item.isActive) && !isHoliday && !isPastDate && (item.availableQuantity > 0) && !deadlinePassed;
-
       return {
         ...item,
         studentCategory: (item as any).studentCategory || 'ALL',
-        isHoliday,
-        holidayReason: (item as any).holidayReason || null,
+        isHoliday: false,
+        holidayReason: null,
         isPastDate,
         isAvailable,
         isDeadlinePassed: deadlinePassed,

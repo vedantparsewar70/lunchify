@@ -14,6 +14,7 @@ import {
   ChevronRight,
   Sparkles,
   FileText,
+  CalendarOff,
 } from 'lucide-react';
 import { useAuth } from '@/components/AuthContext';
 import { useCart } from '@/components/CartContext';
@@ -366,43 +367,67 @@ export default function ParentDashboard() {
               {todayMenu.slice(0, 4).map((menuItem) => (
                 <div
                   key={menuItem.id}
-                  className={`bg-white rounded-2xl p-4 border shadow-xs hover:shadow-md transition-all flex flex-col justify-between gap-3 ${
+                  className={`rounded-2xl p-4 border shadow-xs hover:shadow-md transition-all flex flex-col justify-between gap-3 ${
                     menuItem.isHoliday
-                      ? 'border-purple-200 bg-purple-50/20'
-                      : 'border-slate-200/80'
+                      ? 'border-rose-200 bg-rose-50/40'
+                      : 'border-slate-200/80 bg-white'
                   }`}
                 >
-                  <div className="flex items-start gap-3">
-                    <MealIcon
-                      name={menuItem.meal.name}
-                      category={menuItem.meal.category}
-                      size="md"
-                      className="shrink-0"
-                    />
-                    <div className="flex-1 min-w-0 space-y-1">
-                      <div className="flex items-center gap-1.5 flex-wrap">
-                        <MealCategoryBadge category={menuItem.meal.category} size="sm" />
-                        {menuItem.studentCategory && (
-                          <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-md bg-slate-100 text-slate-600">
-                            {menuItem.studentCategory.replace('_', '-')}
-                          </span>
-                        )}
+                  {menuItem.isHoliday ? (
+                    <div className="flex items-start gap-3">
+                      <div className="w-10 h-10 rounded-xl bg-rose-100 text-rose-600 flex items-center justify-center shrink-0">
+                        <CalendarOff className="w-5 h-5" />
                       </div>
-                      <h4 className="font-extrabold text-slate-900 text-sm leading-tight truncate">
-                        {menuItem.meal.name}
-                      </h4>
-                      {!menuItem.isHoliday && (
-                        <p className="text-xs font-black text-amber-600">
-                          {formatINR(menuItem.meal.price)}
+                      <div className="flex-1 min-w-0 space-y-1">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="text-[10px] font-black uppercase tracking-wider px-2 py-0.5 rounded-md bg-rose-100 text-rose-800 border border-rose-200">
+                            Holiday Today — No Brunch Scheduled
+                          </span>
+                          {menuItem.studentCategory && (
+                            <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-md bg-slate-100 text-slate-600">
+                              {menuItem.studentCategory.replace('_', '-')}
+                            </span>
+                          )}
+                        </div>
+                        <h4 className="font-extrabold text-slate-900 text-sm leading-tight">
+                          {menuItem.holidayReason || 'School Holiday'}
+                        </h4>
+                        <p className="text-xs text-slate-500">
+                          School canteen closed for brunch. No meal booking required.
                         </p>
-                      )}
+                      </div>
                     </div>
-                  </div>
+                  ) : (
+                    <div className="flex items-start gap-3">
+                      <MealIcon
+                        name={menuItem.meal?.name || ''}
+                        category={menuItem.meal?.category || 'LUNCH'}
+                        size="md"
+                        className="shrink-0"
+                      />
+                      <div className="flex-1 min-w-0 space-y-1">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <MealCategoryBadge category={menuItem.meal?.category || 'LUNCH'} size="sm" />
+                          {menuItem.studentCategory && (
+                            <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-md bg-slate-100 text-slate-600">
+                              {menuItem.studentCategory.replace('_', '-')}
+                            </span>
+                          )}
+                        </div>
+                        <h4 className="font-extrabold text-slate-900 text-sm leading-tight truncate">
+                          {menuItem.meal?.name}
+                        </h4>
+                        <p className="text-xs font-black text-amber-600">
+                          {formatINR(menuItem.meal?.price || 0)}
+                        </p>
+                      </div>
+                    </div>
+                  )}
 
                   <div className="flex items-center justify-between pt-2 border-t border-slate-100 text-xs">
                     {menuItem.isHoliday ? (
-                      <span className="text-[11px] font-black text-purple-700 bg-purple-100/80 px-2.5 py-1 rounded-lg">
-                        Holiday — No Brunch {menuItem.holidayReason ? `(${menuItem.holidayReason})` : ''}
+                      <span className="text-[11px] font-bold text-rose-700">
+                        Canteen Closed for Brunch
                       </span>
                     ) : menuItem.isPastDate ? (
                       <span className="text-[11px] font-semibold text-slate-400">

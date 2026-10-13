@@ -21,8 +21,8 @@ export interface StudentData {
   name: string;
   dob?: string | null;
   grade: string;
-  division: string;
-  rollNo: string;
+  division?: string;
+  rollNo?: string;
   studentId: string;
   studentCategory?: StudentCategory;
   allergies?: string | null;
@@ -52,12 +52,12 @@ export interface MealData {
 
 export interface MenuDayItem {
   id: string;
-  mealId: string;
-  meal: MealData;
+  mealId?: string | null;
+  meal?: MealData | null;
   date: string;
   studentCategory?: string;
   isHoliday?: boolean;
-  holidayReason?: string;
+  holidayReason?: string | null;
   availableQuantity: number;
   maxQuantity: number;
   orderingDeadline: string;

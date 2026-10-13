@@ -59,14 +59,21 @@ export async function validateCartAvailability(
   });
   const mealsMap = new Map(meals.map((m: any) => [m.id, m]));
 
-  // 2. Fetch date-specific menu entries
-  const menuRecords = await prisma.menu.findMany({
+  // 2. Fetch date-specific menu entries for all requested dates
+  const dateMenuRecords = await prisma.menu.findMany({
     where: {
-      mealId: { in: mealIds },
       date: { in: dates },
     },
   });
-  const menuRecordsMap = new Map(menuRecords.map((m: any) => [`${m.mealId}__${m.date}`, m]));
+
+  const normalizeCat = (cat?: string) => {
+    if (!cat || cat === 'ALL') return 'ALL';
+    const c = String(cat).toLowerCase();
+    if (c.includes('pre')) return 'Pre-primary';
+    if (c.includes('sec')) return 'Secondary';
+    if (c.includes('pri')) return 'Primary';
+    return cat;
+  };
 
   const itemResults: MealItemAvailability[] = [];
 
@@ -123,6 +130,48 @@ export async function validateCartAvailability(
       continue;
     }
 
+    const itemCat = normalizeCat((item as any).studentCategory);
+
+    // Reject holiday items explicitly
+    if (item.mealId === 'meal_holiday_no_brunch' || mealName.toLowerCase().includes('holiday')) {
+      itemResults.push({
+        mealId: item.mealId,
+        date: item.date,
+        mealName,
+        isAvailable: false,
+        isActive: false,
+        isDeadlinePassed: false,
+        availableQuantity: 0,
+        serverPrice: 0,
+        reason: 'A holiday is not a meal item and cannot be ordered.',
+      });
+      continue;
+    }
+
+    // Check if the target date is a holiday for this student's category
+    const holidayRecord = dateMenuRecords.find((m: any) => {
+      if (m.date !== item.date || !m.isHoliday) return false;
+      const mCat = normalizeCat(m.studentCategory);
+      return mCat === 'ALL' || itemCat === 'ALL' || mCat === itemCat;
+    });
+
+    if (holidayRecord) {
+      itemResults.push({
+        mealId: item.mealId,
+        date: item.date,
+        mealName,
+        isAvailable: false,
+        isActive: false,
+        isDeadlinePassed: false,
+        availableQuantity: 0,
+        serverPrice: 0,
+        reason: holidayRecord.holidayReason
+          ? `${holidayRecord.holidayReason} — No Brunch Scheduled.`
+          : 'Holiday Today — No Brunch Scheduled.',
+      });
+      continue;
+    }
+
     if (!meal) {
       itemResults.push({
         mealId: item.mealId,
@@ -138,37 +187,12 @@ export async function validateCartAvailability(
       continue;
     }
 
-    const normalizeCat = (cat?: string) => {
-      if (!cat || cat === 'ALL') return 'ALL';
-      const c = String(cat).toLowerCase();
-      if (c.includes('pre')) return 'Pre-primary';
-      if (c.includes('sec')) return 'Secondary';
-      if (c.includes('pri')) return 'Primary';
-      return cat;
-    };
-
-    const itemCat = normalizeCat((item as any).studentCategory);
     // Strictly match category-specific menu or universal 'ALL' menu record
-    const menuRecord = menuRecords.find((m: any) => {
+    const menuRecord = dateMenuRecords.find((m: any) => {
       if (m.mealId !== item.mealId || m.date !== item.date) return false;
       const mCat = normalizeCat(m.studentCategory);
       return mCat === 'ALL' || itemCat === 'ALL' || mCat === itemCat;
     });
-
-    if (menuRecord?.isHoliday) {
-      itemResults.push({
-        mealId: item.mealId,
-        date: item.date,
-        mealName,
-        isAvailable: false,
-        isActive: false,
-        isDeadlinePassed: false,
-        availableQuantity: 0,
-        serverPrice,
-        reason: menuRecord.holidayReason ? `${menuRecord.holidayReason} — No Brunch.` : 'Holiday — No Brunch.',
-      });
-      continue;
-    }
 
     if (!menuRecord || !menuRecord.isActive) {
       itemResults.push({

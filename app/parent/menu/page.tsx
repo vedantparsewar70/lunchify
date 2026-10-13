@@ -138,7 +138,7 @@ function MenuPageContent() {
       studentId: selectedChild.id,
       studentName: selectedChild.name,
       studentGrade: selectedChild.grade,
-      studentDivision: selectedChild.division,
+      studentDivision: selectedChild.division || '-',
       studentCategory: activeStudentCategory,
       mealId: menuItem.meal.id,
       mealName: menuItem.meal.name,
@@ -419,7 +419,7 @@ function MenuPageContent() {
 
               const inCart = cartItems.find(
                 (c) =>
-                  c.mealId === menuItem.meal.id &&
+                  c.mealId === menuItem.meal?.id &&
                   c.date === selectedDate &&
                   c.studentId === selectedChildId
               );
@@ -437,7 +437,7 @@ function MenuPageContent() {
 
                     <div className="space-y-1.5">
                       <span className="px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-wider bg-rose-100 text-rose-800 border border-rose-200">
-                        Holiday — No Brunch
+                        Holiday Today — No Brunch Scheduled
                       </span>
                       <h3 className="text-xl sm:text-2xl font-extrabold text-slate-900">
                         {holidayReason}
@@ -708,7 +708,7 @@ function MenuPageContent() {
                         {isHol ? (
                           <div className="flex items-center gap-2">
                             <span className="px-2 py-0.5 rounded-md text-[10px] font-black uppercase bg-rose-100 text-rose-800">
-                              Holiday — No Brunch
+                              Holiday Today — No Brunch Scheduled
                             </span>
                             <span className="text-xs font-bold text-slate-700">
                               {catMenu.holidayReason || catMenu.dish}

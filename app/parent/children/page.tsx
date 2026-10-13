@@ -17,7 +17,7 @@ import { useToast } from '@/components/ToastContext';
 import { useChildren } from '@/components/ChildrenContext';
 import VegBadge from '@/components/VegBadge';
 import ChildAvatar from '@/components/ChildAvatar';
-import { StudentData } from '@/types';
+import { StudentData, StudentCategory } from '@/types';
 
 export default function ChildrenPage() {
   const { user, refreshUser } = useAuth();
@@ -36,34 +36,17 @@ export default function ChildrenPage() {
   const [editingChild, setEditingChild] = useState<StudentData | null>(null);
   const [viewingChild, setViewingChild] = useState<StudentData | null>(null);
 
-  // Form states
+  // Form states: exactly 3 fields (name, optional dob, category)
   const [formName, setFormName] = useState('');
   const [formDob, setFormDob] = useState('');
-  const [formGrade, setFormGrade] = useState('');
-  const [formDivision, setFormDivision] = useState('');
-  const [formRollNo, setFormRollNo] = useState('');
-  const [formStudentId, setFormStudentId] = useState('');
-  const [formIsVeg, setFormIsVeg] = useState(true);
-
-  // Dietary / preference fields
-  const [formDietaryRestrictions, setFormDietaryRestrictions] = useState('');
-  const [formFoodPreference, setFormFoodPreference] = useState('Vegetarian');
-  const [formNotes, setFormNotes] = useState('');
-
+  const [formCategory, setFormCategory] = useState<StudentCategory | ''>('');
   const [submitting, setSubmitting] = useState(false);
 
   const openAddModal = () => {
     setEditingChild(null);
     setFormName('');
     setFormDob('');
-    setFormGrade('');
-    setFormDivision('');
-    setFormRollNo('');
-    setFormStudentId('');
-    setFormIsVeg(true);
-    setFormDietaryRestrictions('');
-    setFormFoodPreference('Vegetarian');
-    setFormNotes('');
+    setFormCategory('');
     setIsAddModalOpen(true);
   };
 
@@ -71,36 +54,36 @@ export default function ChildrenPage() {
     setEditingChild(child);
     setFormName(child.name);
     setFormDob(child.dob || '');
-    setFormGrade(child.grade);
-    setFormDivision(child.division);
-    setFormRollNo(child.rollNo);
-    setFormStudentId(child.studentId);
-    setFormIsVeg(child.isVegetarian);
-    setFormDietaryRestrictions(child.dietaryRestrictions || '');
-    setFormFoodPreference(child.foodPreference || (child.isVegetarian ? 'Vegetarian' : 'Non-Vegetarian'));
-    setFormNotes(child.notes || '');
+    const cat = child.studentCategory ||
+      (child.grade?.toLowerCase().includes('nursery') || child.grade?.toLowerCase().includes('kg') || child.grade?.toLowerCase().includes('pre')
+        ? 'Pre-primary'
+        : parseInt(child.grade || '1', 10) <= 5
+        ? 'Primary'
+        : 'Secondary');
+    setFormCategory(cat as StudentCategory);
     setIsAddModalOpen(true);
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!formName.trim()) {
+      showToast('Student Full Name is required', 'error');
+      return;
+    }
+    if (!formCategory) {
+      showToast('Please select a Class / Category', 'error');
+      return;
+    }
     setSubmitting(true);
 
     try {
       const payload = {
         id: editingChild?.id,
-        name: formName,
-        dob: formDob,
-        grade: formGrade,
-        division: formDivision,
-        rollNo: formRollNo,
-        studentId: formStudentId,
-        allergies: null,
-        allergiesList: [],
-        dietaryRestrictions: formDietaryRestrictions,
-        foodPreference: formFoodPreference,
-        notes: formNotes,
-        isVegetarian: formIsVeg,
+        name: formName.trim(),
+        dob: formDob ? formDob.trim() : null,
+        category: formCategory,
+        studentCategory: formCategory,
+        grade: formCategory,
       };
 
       const res = await fetch('/api/parent/children', {
@@ -114,18 +97,19 @@ export default function ChildrenPage() {
         const savedChild: StudentData = {
           id: data.student?.id || editingChild?.id || '',
           parentId: user?.parentId || '',
-          name: formName,
-          dob: formDob || null,
-          grade: formGrade,
-          division: formDivision,
-          rollNo: formRollNo,
-          studentId: data.student?.studentId || formStudentId,
-          allergies: null,
-          allergiesList: [],
-          dietaryRestrictions: formDietaryRestrictions || null,
-          foodPreference: formFoodPreference || null,
-          notes: formNotes || null,
-          isVegetarian: formIsVeg,
+          name: formName.trim(),
+          dob: formDob ? formDob.trim() : null,
+          grade: formCategory,
+          division: data.student?.division || editingChild?.division || '-',
+          rollNo: data.student?.rollNo || editingChild?.rollNo || '-',
+          studentId: data.student?.studentId || editingChild?.studentId || '',
+          studentCategory: formCategory,
+          allergies: editingChild?.allergies || null,
+          allergiesList: editingChild?.allergiesList || [],
+          dietaryRestrictions: editingChild?.dietaryRestrictions || null,
+          foodPreference: editingChild?.foodPreference || 'Vegetarian',
+          notes: editingChild?.notes || null,
+          isVegetarian: editingChild?.isVegetarian ?? true,
           profilePhoto: null,
           isActive: true,
           allergyAlertStatus: 'NO_ALLERGY',
@@ -248,7 +232,7 @@ export default function ChildrenPage() {
                     </div>
 
                     <div className="flex flex-col items-end gap-1">
-                      <span className={`px-2 py-0.5 text-[9px] font-black uppercase tracking-wider rounded-md border ${
+                      <span className={`px-2.5 py-1 text-[10px] font-black uppercase tracking-wider rounded-lg border ${
                         (child.studentCategory === 'Pre-primary' || child.grade?.toLowerCase().includes('nursery') || child.grade?.toLowerCase().includes('kg'))
                           ? 'bg-purple-50 text-purple-800 border-purple-200'
                           : (child.studentCategory === 'Secondary' || parseInt(child.grade, 10) > 5)
@@ -257,25 +241,22 @@ export default function ChildrenPage() {
                       }`}>
                         {child.studentCategory || (child.grade?.toLowerCase().includes('nursery') || child.grade?.toLowerCase().includes('kg') ? 'Pre-primary' : parseInt(child.grade, 10) <= 5 ? 'Primary' : 'Secondary')}
                       </span>
-                      <span className="px-2 py-0.5 text-[10px] font-bold bg-slate-100 text-slate-700 rounded-md">
-                        {child.grade?.toLowerCase().includes('kg') || child.grade?.toLowerCase().includes('nursery') ? child.grade : `Class ${child.grade}`}-{child.division}
-                      </span>
                     </div>
                   </div>
 
                   {/* Details Grid */}
-                  <div className="mt-4 grid grid-cols-3 gap-2 bg-slate-50 p-3 rounded-2xl border border-slate-100 text-center">
+                  <div className="mt-4 grid grid-cols-2 gap-2 bg-slate-50 p-3 rounded-2xl border border-slate-100 text-center">
                     <div>
-                      <p className="text-[10px] uppercase font-bold text-slate-400">Class</p>
-                      <p className="text-sm font-extrabold text-slate-800">{child.grade}</p>
+                      <p className="text-[10px] uppercase font-bold text-slate-400">Category</p>
+                      <p className="text-sm font-extrabold text-slate-800">
+                        {child.studentCategory || child.grade}
+                      </p>
                     </div>
                     <div>
-                      <p className="text-[10px] uppercase font-bold text-slate-400">Division</p>
-                      <p className="text-sm font-extrabold text-slate-800">{child.division}</p>
-                    </div>
-                    <div>
-                      <p className="text-[10px] uppercase font-bold text-slate-400">Roll No.</p>
-                      <p className="text-sm font-extrabold text-slate-800">{child.rollNo}</p>
+                      <p className="text-[10px] uppercase font-bold text-slate-400">Date of Birth</p>
+                      <p className="text-xs font-extrabold text-slate-800 mt-0.5 truncate">
+                        {child.dob ? child.dob : 'Not specified'}
+                      </p>
                     </div>
                   </div>
                 </div>
@@ -320,10 +301,10 @@ export default function ChildrenPage() {
         </div>
       )}
 
-      {/* Add / Edit Child Modal with Multi-select Allergies */}
+      {/* Simplified Register / Edit Child Modal: ONLY Name, optional DOB, and Category */}
       {isAddModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/60 backdrop-blur-xs">
-          <div className="bg-white rounded-3xl shadow-2xl max-w-lg w-full max-h-[92vh] overflow-y-auto border border-slate-100">
+          <div className="bg-white rounded-3xl shadow-2xl max-w-md w-full overflow-hidden border border-slate-100 animate-in fade-in zoom-in-95 duration-150">
             <div className="p-6 border-b border-slate-100 flex items-center justify-between">
               <div className="flex items-center gap-3">
                 <ChildAvatar size="md" />
@@ -331,7 +312,7 @@ export default function ChildrenPage() {
                   <h3 className="text-lg font-extrabold text-slate-900">
                     {editingChild ? `Edit Child: ${editingChild.name}` : 'Register a Child'}
                   </h3>
-                  <p className="text-xs text-slate-500">Provide school credentials and dietary preferences</p>
+                  <p className="text-xs text-slate-500">Provide student details to personalize meal plans</p>
                 </div>
               </div>
               <button
@@ -344,7 +325,7 @@ export default function ChildrenPage() {
 
             <form onSubmit={handleSubmit} className="p-6 space-y-4">
               <div>
-                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1.5">
                   Student Full Name *
                 </label>
                 <input
@@ -358,82 +339,37 @@ export default function ChildrenPage() {
               </div>
 
               <div>
-                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
-                  Date of Birth
+                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1.5 flex items-center justify-between">
+                  <span>Date of Birth</span>
+                  <span className="text-[10px] text-slate-400 font-normal lowercase">(optional)</span>
                 </label>
                 <input
                   type="date"
                   value={formDob}
                   onChange={(e) => setFormDob(e.target.value)}
-                  className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-900"
+                  className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-900 focus:outline-hidden focus:ring-2 focus:ring-amber-500 focus:bg-white"
                 />
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
-                    Class / Grade *
-                  </label>
-                  <select
-                    required
-                    value={formGrade}
-                    onChange={(e) => setFormGrade(e.target.value)}
-                    className="w-full px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-900"
-                  >
-                    <option value="" disabled>Select Class</option>
-                    <optgroup label="Pre-primary (Nursery & KG)">
-                      <option value="Nursery">Nursery</option>
-                      <option value="Jr. KG">Jr. KG</option>
-                      <option value="Sr. KG">Sr. KG</option>
-                    </optgroup>
-                    <optgroup label="Primary (Classes 1 - 5)">
-                      {['1', '2', '3', '4', '5'].map((g) => (
-                        <option key={g} value={g}>Class {g}</option>
-                      ))}
-                    </optgroup>
-                    <optgroup label="Secondary (Classes 6 - 12)">
-                      {['6', '7', '8', '9', '10', '11', '12'].map((g) => (
-                        <option key={g} value={g}>Class {g}</option>
-                      ))}
-                    </optgroup>
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
-                    Division *
-                  </label>
-                  <select
-                    required
-                    value={formDivision}
-                    onChange={(e) => setFormDivision(e.target.value)}
-                    className="w-full px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-900"
-                  >
-                    <option value="" disabled>Select Div (e.g. Div A)</option>
-                    {['A', 'B', 'C', 'D', 'E'].map((d) => (
-                      <option key={d} value={d}>
-                        Div {d}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
-                    Roll No *
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    value={formRollNo}
-                    onChange={(e) => setFormRollNo(e.target.value)}
-                    placeholder="e.g. 12"
-                    className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-900"
-                  />
-                </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1.5">
+                  Class / Category *
+                </label>
+                <select
+                  required
+                  value={formCategory}
+                  onChange={(e) => setFormCategory(e.target.value as StudentCategory)}
+                  className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm font-semibold focus:outline-hidden focus:ring-2 focus:ring-amber-500 focus:bg-white text-slate-900 cursor-pointer"
+                >
+                  <option value="" disabled>Select Class / Category</option>
+                  <option value="Pre-primary">Pre-primary</option>
+                  <option value="Primary">Primary</option>
+                  <option value="Secondary">Secondary</option>
+                </select>
+                <p className="text-[11px] text-slate-400 mt-1">
+                  Determines the daily school brunch menu scheduled for your child.
+                </p>
               </div>
-
-
 
               <div className="pt-4 flex items-center justify-end gap-3 border-t border-slate-100">
                 <button
@@ -446,7 +382,7 @@ export default function ChildrenPage() {
                 <button
                   type="submit"
                   disabled={submitting}
-                  className="px-5 py-2.5 bg-amber-500 hover:bg-amber-600 text-white rounded-xl text-xs font-bold shadow-md transition-colors cursor-pointer"
+                  className="px-5 py-2.5 bg-amber-500 hover:bg-amber-600 text-white rounded-xl text-xs font-bold shadow-md transition-colors cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
                 >
                   {submitting ? 'Saving...' : editingChild ? 'Save Changes' : 'Register Child'}
                 </button>
@@ -456,7 +392,7 @@ export default function ChildrenPage() {
         </div>
       )}
 
-      {/* Clean Child Profile Modal (Requirement 11) */}
+      {/* Clean Child Profile Modal */}
       {viewingChild && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/60 backdrop-blur-xs animate-in fade-in duration-150">
           <div className="bg-white rounded-3xl shadow-2xl max-w-sm w-full p-6 border border-slate-100 space-y-5 text-center">
@@ -484,18 +420,14 @@ export default function ChildrenPage() {
               <p className="font-mono text-xs font-bold text-amber-700">{viewingChild.studentId}</p>
             </div>
 
-            <div className="grid grid-cols-3 gap-2 bg-slate-50 p-3 rounded-2xl text-xs">
+            <div className="grid grid-cols-2 gap-2 bg-slate-50 p-3 rounded-2xl text-xs">
               <div>
-                <p className="text-[10px] text-slate-400 font-bold uppercase">Class</p>
-                <p className="font-extrabold text-slate-800">{viewingChild.grade}</p>
+                <p className="text-[10px] text-slate-400 font-bold uppercase">Class / Category</p>
+                <p className="font-extrabold text-slate-800">{viewingChild.studentCategory || viewingChild.grade}</p>
               </div>
               <div>
-                <p className="text-[10px] text-slate-400 font-bold uppercase">Division</p>
-                <p className="font-extrabold text-slate-800">{viewingChild.division}</p>
-              </div>
-              <div>
-                <p className="text-[10px] text-slate-400 font-bold uppercase">Roll No</p>
-                <p className="font-extrabold text-slate-800">{viewingChild.rollNo}</p>
+                <p className="text-[10px] text-slate-400 font-bold uppercase">Date of Birth</p>
+                <p className="font-extrabold text-slate-800">{viewingChild.dob || 'Not specified'}</p>
               </div>
             </div>
 

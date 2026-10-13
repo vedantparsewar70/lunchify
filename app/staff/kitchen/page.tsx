@@ -2,27 +2,27 @@
 
 import React, { useEffect, useState, useMemo, Suspense } from 'react';
 import {
-  ChefHat,
-  RefreshCw,
+  CalendarDays,
+  CalendarOff,
+  Clock,
+  CheckCircle2,
+  AlertCircle,
+  Calendar,
   UtensilsCrossed,
-  CheckSquare,
-  Square,
-  Save,
+  Layers,
+  ChevronDown,
+  ChevronUp,
   Search,
   Plus,
   Edit2,
   X,
   Loader2,
-  CheckCircle2,
-  AlertCircle,
-  Check,
-  CalendarDays,
-  CalendarOff,
-  Clock,
-  Layers,
-  Sparkles,
+  RefreshCw,
   Info,
-  Calendar,
+  Sparkles,
+  ShieldCheck,
+  ChevronRight,
+  Check,
 } from 'lucide-react';
 import VegBadge from '@/components/VegBadge';
 import MealIcon from '@/components/MealIcon';
@@ -46,21 +46,13 @@ function StaffKitchenContent() {
   const [selectedStudentCategory, setSelectedStudentCategory] = useState<string>('ALL');
   const [currentDayMenus, setCurrentDayMenus] = useState<any[]>([]);
   const [isTimetableModalOpen, setIsTimetableModalOpen] = useState(false);
+  const [isCatalogExpanded, setIsCatalogExpanded] = useState(false);
 
-  // --- Tomorrow's Complete Menu State ---
+  // --- Master Recipe Catalog State ---
   const [allMeals, setAllMeals] = useState<MealData[]>([]);
-  const [selectedMealIds, setSelectedMealIds] = useState<string[]>([]);
-  const [initialSavedMealIds, setInitialSavedMealIds] = useState<string[]>([]);
-  const [loadingTomorrow, setLoadingTomorrow] = useState(false);
-  const [savingTomorrow, setSavingTomorrow] = useState(false);
-  const [tomorrowSearch, setTomorrowSearch] = useState('');
-  const [tomorrowCategoryFilter, setTomorrowCategoryFilter] = useState('ALL');
-
-  const hasUnsavedChanges = useMemo(() => {
-    if (selectedMealIds.length !== initialSavedMealIds.length) return true;
-    const initialSet = new Set(initialSavedMealIds);
-    return selectedMealIds.some((id) => !initialSet.has(id));
-  }, [selectedMealIds, initialSavedMealIds]);
+  const [loadingMeals, setLoadingMeals] = useState(false);
+  const [catalogSearch, setCatalogSearch] = useState('');
+  const [catalogCategoryFilter, setCatalogCategoryFilter] = useState('ALL');
 
   // --- Add Food Item Modal State ---
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
@@ -68,7 +60,6 @@ function StaffKitchenContent() {
   const [newMealCategory, setNewMealCategory] = useState('LUNCH');
   const [newMealPrice, setNewMealPrice] = useState('80');
   const [newMealIsVeg, setNewMealIsVeg] = useState(true);
-  const [newMealAvailableTomorrow, setNewMealAvailableTomorrow] = useState(true);
   const [creatingMeal, setCreatingMeal] = useState(false);
 
   // --- Edit Food Item Modal State ---
@@ -80,11 +71,11 @@ function StaffKitchenContent() {
   const [editMealIsVeg, setEditMealIsVeg] = useState(true);
   const [updatingMeal, setUpdatingMeal] = useState(false);
 
-  // Fetch Complete Master Menu & Active Schedule for selected date & category
-  const fetchTomorrowMenuData = async (targetDate?: string, targetCategory?: string) => {
+  // Fetch Master Menu Catalog & Active Database Menus for selected date & category
+  const fetchMenuData = async (targetDate?: string, targetCategory?: string) => {
     const queryDate = targetDate || selectedDateStr;
     const queryCat = targetCategory !== undefined ? targetCategory : selectedStudentCategory;
-    setLoadingTomorrow(true);
+    setLoadingMeals(true);
     try {
       const catParam = queryCat && queryCat !== 'ALL' ? `&category=${encodeURIComponent(queryCat)}` : '';
       const [mealsRes, menusRes] = await Promise.all([
@@ -94,42 +85,37 @@ function StaffKitchenContent() {
 
       if (mealsRes.ok) {
         const data = await mealsRes.json();
-        setAllMeals(data.meals || []);
+        const catalog = (data.meals || []).filter(
+          (m: any) => m.id !== 'meal_holiday_no_brunch' && !m.name.toLowerCase().includes('holiday')
+        );
+        setAllMeals(catalog);
       }
 
       if (menusRes.ok) {
         const menuData = await menusRes.json();
-        const menusList = menuData.menus || [];
-        setCurrentDayMenus(menusList);
-
-        const activeIds = menusList
-          .filter((item: any) => Boolean(item.isActive))
-          .map((item: any) => item.mealId);
-
-        setSelectedMealIds(activeIds);
-        setInitialSavedMealIds(activeIds);
+        setCurrentDayMenus(menuData.menus || []);
       }
     } catch (err) {
       console.error('Failed to load menu data:', err);
-      showToast('Error loading menu items', 'error');
+      showToast('Error loading timetable data', 'error');
     } finally {
-      setLoadingTomorrow(false);
+      setLoadingMeals(false);
     }
   };
 
   useEffect(() => {
-    fetchTomorrowMenuData();
+    fetchMenuData();
   }, [selectedDateStr, selectedStudentCategory]);
 
-  // Live real-time synchronization across staff and parents without manual refresh
+  // Live real-time synchronization
   useSyncWatcher({
     onMenuUpdate: () => {
-      fetchTomorrowMenuData();
+      fetchMenuData();
     },
   });
 
+  // Safe date rollover handler
   useEffect(() => {
-    // 1. Schedule exact timer at 12:00:00 AM midnight
     let timeoutId: NodeJS.Timeout;
     const scheduleMidnight = () => {
       const now = new Date();
@@ -142,37 +128,22 @@ function StaffKitchenContent() {
 
         setTodayDateStr(newToday);
         setTomorrowDateStr(newTomorrow);
-        setSelectedMealIds([]);
-        setInitialSavedMealIds([]);
 
-        showToast(
-          '12:00 AM Rollover: New school day active.',
-          'info'
-        );
-
-        fetchTomorrowMenuData(newToday);
+        showToast('12:00 AM Rollover: New school day active.', 'info');
+        fetchMenuData(newToday);
         scheduleMidnight();
       }, msUntilMidnight);
     };
 
     scheduleMidnight();
 
-    // 2. Periodic safety interval (every 15s) for background tab or device wake from sleep
     const intervalId = setInterval(() => {
       const currentToday = getTodayString();
       if (currentToday !== todayDateStr) {
         const newTomorrow = getOffsetDateString(1);
         setTodayDateStr(currentToday);
         setTomorrowDateStr(newTomorrow);
-        setSelectedMealIds([]);
-        setInitialSavedMealIds([]);
-
-        showToast(
-          'Date changed: Updated to current school day.',
-          'info'
-        );
-
-        fetchTomorrowMenuData(currentToday);
+        fetchMenuData(currentToday);
       }
     }, 15000);
 
@@ -182,134 +153,37 @@ function StaffKitchenContent() {
     };
   }, [todayDateStr]);
 
-  // Toggle selection for Tomorrow
-  const handleToggleMeal = (mealId: string) => {
-    setSelectedMealIds((prev) =>
-      prev.includes(mealId) ? prev.filter((id) => id !== mealId) : [...prev, mealId]
-    );
-  };
+  // Date status indicators
+  const isPastDate = selectedDateStr < todayDateStr;
+  const isToday = selectedDateStr === todayDateStr;
+  const isTomorrow = selectedDateStr === tomorrowDateStr;
 
-  const getDisplayCategory = (cat?: string | null) => {
-    const c = (cat || 'LUNCH').toUpperCase().trim();
-    if (c === 'SNACK') return 'BREAKFAST';
-    return c;
-  };
+  // Authoritative entry from October 2026 Timetable
+  const officialDayEntry = useMemo(() => {
+    return OCTOBER_2026_TIMETABLE.find((d) => d.date === selectedDateStr);
+  }, [selectedDateStr]);
 
-  // Filter meals for Tomorrow's list
-  const filteredMeals = useMemo(() => {
+  // Categories to display based on filter
+  const categoriesToDisplay: StudentCategory[] = useMemo(() => {
+    if (selectedStudentCategory === 'Pre-primary') return ['Pre-primary'];
+    if (selectedStudentCategory === 'Primary') return ['Primary'];
+    if (selectedStudentCategory === 'Secondary') return ['Secondary'];
+    return ['Pre-primary', 'Primary', 'Secondary'];
+  }, [selectedStudentCategory]);
+
+  // Recipe Catalog filtering
+  const filteredCatalogMeals = useMemo(() => {
     return allMeals.filter((meal) => {
       const matchesSearch =
-        !tomorrowSearch.trim() ||
-        meal.name.toLowerCase().includes(tomorrowSearch.toLowerCase().trim());
-      const mealCat = getDisplayCategory(meal.category);
+        !catalogSearch.trim() ||
+        meal.name.toLowerCase().includes(catalogSearch.toLowerCase().trim());
+      const cat = (meal.category || 'LUNCH').toUpperCase().trim();
+      const displayCat = cat === 'SNACK' ? 'BREAKFAST' : cat;
       const matchesCategory =
-        tomorrowCategoryFilter === 'ALL' || mealCat === tomorrowCategoryFilter;
+        catalogCategoryFilter === 'ALL' || displayCat === catalogCategoryFilter;
       return matchesSearch && matchesCategory;
     });
-  }, [allMeals, tomorrowSearch, tomorrowCategoryFilter]);
-
-  // Unique categories in catalog (Snack merged into Breakfast)
-  const availableCategories = useMemo(() => {
-    const set = new Set<string>();
-    allMeals.forEach((m) => {
-      set.add(getDisplayCategory(m.category));
-    });
-    const order = ['LUNCH', 'BREAKFAST'];
-    const sorted = Array.from(set).sort((a, b) => {
-      const idxA = order.indexOf(a);
-      const idxB = order.indexOf(b);
-      if (idxA !== -1 && idxB !== -1) return idxA - idxB;
-      if (idxA !== -1) return -1;
-      if (idxB !== -1) return 1;
-      return a.localeCompare(b);
-    });
-    return sorted;
-  }, [allMeals]);
-
-  // Group filtered meals by category (Snack items grouped under Breakfast)
-  const groupedMeals = useMemo(() => {
-    const groups: Record<string, MealData[]> = {};
-    filteredMeals.forEach((m) => {
-      const cat = getDisplayCategory(m.category);
-      if (!groups[cat]) groups[cat] = [];
-      groups[cat].push(m);
-    });
-    return groups;
-  }, [filteredMeals]);
-
-  // Visual feedback state for Select All / Deselect All controls
-  const [actionFeedback, setActionFeedback] = useState<'select' | 'deselect' | null>(null);
-
-  const isAllVisibleSelected = useMemo(() => {
-    if (filteredMeals.length === 0) return false;
-    return filteredMeals.every((m) => selectedMealIds.includes(m.id));
-  }, [filteredMeals, selectedMealIds]);
-
-  const isAllVisibleDeselected = useMemo(() => {
-    if (filteredMeals.length === 0) return true;
-    return filteredMeals.every((m) => !selectedMealIds.includes(m.id));
-  }, [filteredMeals, selectedMealIds]);
-
-  const handleSelectAll = () => {
-    if (filteredMeals.length === 0) return;
-    setActionFeedback('select');
-    setTimeout(() => {
-      setActionFeedback((prev) => (prev === 'select' ? null : prev));
-    }, 1200);
-
-    if (isAllVisibleSelected) return;
-
-    const visibleIds = filteredMeals.map((m) => m.id);
-    const combined = Array.from(new Set([...selectedMealIds, ...visibleIds]));
-    setSelectedMealIds(combined);
-    showToast(`Selected all ${visibleIds.length} visible items`, 'info');
-  };
-
-  const handleDeselectAll = () => {
-    if (filteredMeals.length === 0) return;
-    setActionFeedback('deselect');
-    setTimeout(() => {
-      setActionFeedback((prev) => (prev === 'deselect' ? null : prev));
-    }, 1200);
-
-    if (isAllVisibleDeselected) return;
-
-    const visibleIds = new Set(filteredMeals.map((m) => m.id));
-    setSelectedMealIds((prev) => prev.filter((id) => !visibleIds.has(id)));
-    showToast('Deselected visible items', 'info');
-  };
-
-  // Save Menu
-  const handleSaveTomorrowMenu = async () => {
-    setSavingTomorrow(true);
-    try {
-      const res = await fetch('/api/admin/menus/publish', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          date: selectedDateStr,
-          studentCategory: selectedStudentCategory,
-          selectedMealIds,
-        }),
-      });
-
-      if (res.ok) {
-        setInitialSavedMealIds([...selectedMealIds]);
-        broadcastSyncEvent('MENU_UPDATED');
-        showToast(
-          `Custom menu adjustments for ${formatDatePretty(selectedDateStr)} saved!`,
-          'success'
-        );
-      } else {
-        const err = await res.json();
-        showToast(err.error || 'Failed to save menu', 'error');
-      }
-    } catch {
-      showToast('Network error saving menu', 'error');
-    } finally {
-      setSavingTomorrow(false);
-    }
-  };
+  }, [allMeals, catalogSearch, catalogCategoryFilter]);
 
   // Add New Food Item
   const handleCreateNewMeal = async (e: React.FormEvent) => {
@@ -318,7 +192,7 @@ function StaffKitchenContent() {
     const priceNum = parseFloat(newMealPrice);
 
     if (!cleanName) {
-      showToast('Please enter a food item name', 'error');
+      showToast('Please enter a recipe name', 'error');
       return;
     }
     if (isNaN(priceNum) || priceNum <= 0) {
@@ -343,28 +217,13 @@ function StaffKitchenContent() {
       if (res.ok) {
         const data = await res.json();
         const createdMeal: MealData = data.meal;
-
-        // Add to catalog
         setAllMeals((prev) => [createdMeal, ...prev]);
-
-        // If selected for tomorrow, immediately add to selected list
-        if (newMealAvailableTomorrow) {
-          setSelectedMealIds((prev) => Array.from(new Set([createdMeal.id, ...prev])));
-        }
-
         broadcastSyncEvent('MENU_UPDATED');
-
-        showToast(
-          `"${createdMeal.name}" added to menu catalog!`,
-          'success'
-        );
-
-        // Reset form
+        showToast(`"${createdMeal.name}" added to master recipe catalog!`, 'success');
         setIsAddModalOpen(false);
         setNewMealName('');
         setNewMealPrice('80');
         setNewMealIsVeg(true);
-        setNewMealAvailableTomorrow(true);
       } else {
         const err = await res.json();
         showToast(err.error || 'Failed to create meal', 'error');
@@ -420,8 +279,6 @@ function StaffKitchenContent() {
 
       if (res.ok) {
         showToast(`"${cleanName}" updated successfully!`, 'success');
-
-        // Update local meals array
         setAllMeals((prev) =>
           prev.map((m) =>
             m.id === editingMeal.id
@@ -435,93 +292,82 @@ function StaffKitchenContent() {
               : m
           )
         );
-
         setIsEditModalOpen(false);
         setEditingMeal(null);
         broadcastSyncEvent('MENU_UPDATED');
       } else {
         const err = await res.json();
-        showToast(err.error || 'Failed to update item', 'error');
+        showToast(err.error || 'Failed to update recipe', 'error');
       }
     } catch {
-      showToast('Network error updating item', 'error');
+      showToast('Network error updating recipe', 'error');
     } finally {
       setUpdatingMeal(false);
     }
   };
 
-  // Date context flags
-  const isPastDate = selectedDateStr < todayDateStr;
-  const isToday = selectedDateStr === todayDateStr;
-  const isTomorrow = selectedDateStr === tomorrowDateStr;
-
-  // Resolve official timetable day entry
-  const officialDayEntry = useMemo(() => {
-    return OCTOBER_2026_TIMETABLE.find((d) => d.date === selectedDateStr) || null;
-  }, [selectedDateStr]);
-
-  // Which student categories to display in the official timetable section
-  const categoriesToDisplay: StudentCategory[] = useMemo(() => {
-    if (selectedStudentCategory === 'ALL') {
-      return ['Pre-primary', 'Primary', 'Secondary'];
-    }
-    const normalized = getStudentCategory(undefined, selectedStudentCategory);
-    return [normalized];
-  }, [selectedStudentCategory]);
-
   return (
-    <div className="max-w-4xl mx-auto px-4 py-5 space-y-6 print:p-0 print:m-0 pb-28 sm:pb-16">
-      {/* Canteen Staff Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-200 print:hidden">
+    <div className="max-w-7xl mx-auto px-3.5 sm:px-6 lg:px-8 py-5 sm:py-8 space-y-6 pb-24">
+      {/* ========================================================================= */}
+      {/* 1. TOP HEADER BANNER: Authoritative Timetable Dashboard                   */}
+      {/* ========================================================================= */}
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-4 border-b border-slate-200">
         <div>
           <div className="flex items-center gap-2">
-            <span className="text-[10px] font-black uppercase tracking-widest text-amber-700 bg-amber-100/90 px-2.5 py-0.5 rounded-md">
-              Canteen Operations & Timetable
+            <span className="px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-amber-500 text-white shadow-xs">
+              Official Timetable
             </span>
-            <span className="text-xs text-slate-500 font-semibold">S.B. Patil School</span>
+            <span className="text-xs font-bold text-slate-500">
+              October 2026 Brunch Master System
+            </span>
           </div>
-          <h1 className="text-xl sm:text-2xl font-black text-slate-900 tracking-tight mt-1 flex items-center gap-2">
-            <ChefHat className="w-6 h-6 text-amber-500" />
-            <span>Student Menu Management</span>
+          <h1 className="text-xl sm:text-2xl lg:text-3xl font-black text-slate-900 tracking-tight flex items-center gap-2 mt-1">
+            <CalendarDays className="w-6 h-6 sm:w-7 sm:h-7 text-amber-500 shrink-0" />
+            <span>Canteen Daily Production Schedule</span>
           </h1>
-          <p className="text-xs text-slate-500 mt-0.5">
-            Review scheduled October 2026 timetable meals for student categories and manage kitchen recipe catalog.
+          <p className="text-xs sm:text-sm text-slate-500 mt-1">
+            Authoritative daily brunch menu derived from the official October 2026 school timetable.
           </p>
         </div>
 
-        <div className="flex items-center gap-2 self-start sm:self-auto">
+        <div className="flex items-center gap-2 self-start md:self-auto flex-wrap">
           <button
             type="button"
             onClick={() => setIsTimetableModalOpen(true)}
-            className="inline-flex items-center gap-1.5 px-3 py-2 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-white rounded-xl text-xs font-black shadow-2xs transition-all cursor-pointer"
+            className="inline-flex items-center gap-2 px-4 py-2.5 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-white rounded-xl text-xs font-black shadow-sm transition-all cursor-pointer"
           >
-            <Calendar className="w-3.5 h-3.5" />
-            <span>Full Month Timetable</span>
+            <Calendar className="w-4 h-4" />
+            <span>Full Month Timetable (31 Days)</span>
           </button>
 
           <button
-            onClick={() => fetchTomorrowMenuData()}
-            disabled={loadingTomorrow}
-            className="p-2 bg-white border border-slate-200 rounded-xl hover:bg-slate-50 text-slate-700 transition-colors shadow-2xs cursor-pointer"
-            title="Refresh menu data"
+            type="button"
+            onClick={() => fetchMenuData()}
+            disabled={loadingMeals}
+            className="p-2.5 bg-white border border-slate-200 rounded-xl hover:bg-slate-50 text-slate-700 transition-colors shadow-2xs cursor-pointer"
+            title="Refresh timetable data"
           >
             <RefreshCw
-              className={`w-4 h-4 ${loadingTomorrow ? 'animate-spin text-amber-500' : ''}`}
+              className={`w-4 h-4 ${loadingMeals ? 'animate-spin text-amber-500' : ''}`}
             />
           </button>
         </div>
       </div>
 
-      {/* Global Filter Bar: Date & Student Category Selector */}
-      <div className="bg-white p-4 rounded-3xl border border-slate-200 shadow-sm space-y-3">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
-          {/* Quick Date Buttons */}
+      {/* ========================================================================= */}
+      {/* 2. DATE & CATEGORY CONTROLS (Intuitive & Always Accessible)               */}
+      {/* ========================================================================= */}
+      <div className="bg-white p-4 sm:p-5 rounded-3xl border border-slate-200 shadow-sm space-y-4">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 text-xs">
+          {/* Quick Date Selectors */}
           <div className="flex items-center gap-2 flex-wrap">
-            <span className="font-extrabold text-slate-600 text-[11px] uppercase tracking-wider">Date:</span>
+            <span className="font-black text-slate-600 text-[11px] uppercase tracking-wider mr-1">
+              Select Date:
+            </span>
             <button
               type="button"
               onClick={() => setSelectedDateStr(todayDateStr)}
-              className={`px-3 py-1.5 rounded-xl text-xs font-black transition-all cursor-pointer ${
+              className={`px-3.5 py-2 rounded-xl text-xs font-black transition-all cursor-pointer ${
                 isToday
                   ? 'bg-amber-500 text-white shadow-xs'
                   : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
@@ -532,7 +378,7 @@ function StaffKitchenContent() {
             <button
               type="button"
               onClick={() => setSelectedDateStr(tomorrowDateStr)}
-              className={`px-3 py-1.5 rounded-xl text-xs font-black transition-all cursor-pointer ${
+              className={`px-3.5 py-2 rounded-xl text-xs font-black transition-all cursor-pointer ${
                 isTomorrow
                   ? 'bg-amber-500 text-white shadow-xs'
                   : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
@@ -546,13 +392,18 @@ function StaffKitchenContent() {
               min="2026-10-01"
               max="2026-10-31"
               onChange={(e) => setSelectedDateStr(e.target.value)}
-              className="text-xs font-bold text-slate-800 bg-slate-50 border border-slate-200 rounded-xl px-2.5 py-1.5 focus:outline-hidden focus:border-amber-500 cursor-pointer"
+              className="text-xs font-black text-slate-800 bg-slate-50 border border-slate-200 rounded-xl px-3 py-1.5 focus:outline-hidden focus:border-amber-500 cursor-pointer shadow-2xs"
             />
+            <span className="text-xs font-bold text-slate-500 hidden sm:inline ml-1">
+              ({formatDatePretty(selectedDateStr)})
+            </span>
           </div>
 
           {/* Student Category Selector Tabs */}
-          <div className="flex items-center gap-1.5 overflow-x-auto pb-1 sm:pb-0">
-            <span className="font-extrabold text-slate-600 text-[11px] uppercase tracking-wider">Category:</span>
+          <div className="flex items-center gap-1.5 overflow-x-auto pb-1 lg:pb-0">
+            <span className="font-black text-slate-600 text-[11px] uppercase tracking-wider mr-1 shrink-0">
+              Category:
+            </span>
             {[
               { id: 'ALL', label: 'All Categories' },
               { id: 'Pre-primary', label: 'Pre-primary' },
@@ -563,10 +414,10 @@ function StaffKitchenContent() {
                 key={cat.id}
                 type="button"
                 onClick={() => setSelectedStudentCategory(cat.id)}
-                className={`px-3 py-1.5 rounded-xl text-xs font-black transition-all shrink-0 cursor-pointer ${
+                className={`px-3.5 py-2 rounded-xl text-xs font-black transition-all shrink-0 cursor-pointer ${
                   selectedStudentCategory === cat.id
-                    ? 'bg-amber-500 text-white shadow-xs'
-                    : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                    ? 'bg-slate-900 text-white shadow-xs'
+                    : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
                 }`}
               >
                 {cat.label}
@@ -577,44 +428,43 @@ function StaffKitchenContent() {
       </div>
 
       {/* ========================================================================= */}
-      {/* SECTION A: OFFICIAL SCHOOL BRUNCH TIMETABLE (Authoritative & Prominent)   */}
+      {/* 3. SECTION A: OFFICIAL SCHEDULED MENU (PRIMARY & DOMINANT HERO INTERFACE) */}
       {/* ========================================================================= */}
-      <section className="bg-gradient-to-br from-amber-500/10 via-orange-500/5 to-white p-5 sm:p-6 rounded-3xl border-2 border-amber-300/80 shadow-md space-y-4">
-        {/* Section A Header */}
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-amber-200/70">
+      <section className="bg-gradient-to-br from-amber-500/10 via-orange-500/5 to-white p-5 sm:p-7 rounded-3xl border-2 border-amber-300 shadow-md space-y-6">
+        {/* Section Header */}
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-amber-200/80">
           <div>
             <div className="flex items-center gap-2">
               <span className="px-2.5 py-0.5 rounded-full text-[10px] font-black bg-amber-500 text-white uppercase tracking-wider">
-                Official School Timetable
+                Official Daily Brunch Schedule
               </span>
               <span className="text-xs font-extrabold text-slate-600">
-                {formatDatePretty(selectedDateStr)}
+                {officialDayEntry?.day || 'Scheduled Day'}
               </span>
             </div>
-            <h2 className="text-lg sm:text-xl font-black text-slate-900 tracking-tight mt-1 flex items-center gap-2">
-              <CalendarDays className="w-5 h-5 text-amber-600" />
-              <span>Scheduled Brunch for {formatDatePretty(selectedDateStr)}</span>
+            <h2 className="text-xl sm:text-2xl font-black text-slate-900 tracking-tight mt-1 flex items-center gap-2">
+              <span>{formatDatePretty(selectedDateStr)}</span>
             </h2>
-            <p className="text-xs text-slate-600 mt-0.5">
-              Authoritative school menu from the October 2026 timetable. The system automatically serves these dishes to students without manual catalog selection.
+            <p className="text-xs text-slate-600 mt-1">
+              Authoritative schedule from the school spreadsheet. These dishes are automatically active for student orders.
             </p>
           </div>
 
           <div className="self-start sm:self-auto shrink-0">
             {isPastDate ? (
-              <span className="px-3 py-1 bg-slate-100 text-slate-600 border border-slate-300 rounded-xl text-xs font-black inline-flex items-center gap-1.5">
+              <span className="px-3.5 py-1.5 bg-slate-100 text-slate-600 border border-slate-300 rounded-xl text-xs font-black inline-flex items-center gap-1.5">
                 <Clock className="w-3.5 h-3.5" />
-                <span>Historical Timetable (Read-Only)</span>
+                <span>Historical Timetable (Service Closed)</span>
               </span>
             ) : isToday ? (
-              <span className="px-3 py-1 bg-emerald-100 text-emerald-900 border border-emerald-300 rounded-xl text-xs font-black inline-flex items-center gap-1.5 animate-pulse">
+              <span className="px-3.5 py-1.5 bg-emerald-100 text-emerald-900 border border-emerald-300 rounded-xl text-xs font-black inline-flex items-center gap-1.5 animate-pulse">
                 <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
-                <span>Today&apos;s Active Timetable</span>
+                <span>Today&apos;s Active Service</span>
               </span>
             ) : (
-              <span className="px-3 py-1 bg-blue-100 text-blue-900 border border-blue-300 rounded-xl text-xs font-black inline-flex items-center gap-1.5">
+              <span className="px-3.5 py-1.5 bg-blue-100 text-blue-900 border border-blue-300 rounded-xl text-xs font-black inline-flex items-center gap-1.5">
                 <CalendarDays className="w-3.5 h-3.5 text-blue-600" />
-                <span>Upcoming Scheduled Date</span>
+                <span>Upcoming Scheduled Service</span>
               </span>
             )}
           </div>
@@ -622,7 +472,7 @@ function StaffKitchenContent() {
 
         {/* Category Cards Grid */}
         <div
-          className={`grid gap-4 ${
+          className={`grid gap-5 ${
             categoriesToDisplay.length > 1
               ? 'grid-cols-1 md:grid-cols-3'
               : 'grid-cols-1 max-w-2xl mx-auto'
@@ -637,39 +487,37 @@ function StaffKitchenContent() {
 
             const isHoliday = Boolean(officialMenu?.isHoliday || dbMenu?.isHoliday);
             const holidayReason =
-              officialMenu?.holidayReason || dbMenu?.holidayReason || 'School Holiday — No Brunch';
+              officialMenu?.holidayReason || dbMenu?.holidayReason || 'Holiday Today — No Brunch Scheduled';
+
             const dishName =
               officialMenu?.dish && !officialMenu.isHoliday
                 ? officialMenu.dish
                 : dbMenu?.meal?.name && !dbMenu?.isHoliday
                 ? dbMenu.meal.name
                 : isHoliday
-                ? 'Holiday — No Brunch'
+                ? 'Holiday Today — No Brunch Scheduled'
                 : 'Scheduled Brunch';
 
-            // Lookup meal details from catalog
+            // Lookup meal details from master catalog for ingredient notes
             const catalogMeal = OCTOBER_2026_MEAL_CATALOG.find(
               (m) => m.name.toLowerCase().trim() === dishName.toLowerCase().trim()
             ) || dbMenu?.meal;
 
-            // Card theme styles per category
-            const themeStyles = {
+            // Visual styling per student category
+            const theme = {
               'Pre-primary': {
                 border: 'border-purple-300',
                 badgeBg: 'bg-purple-100 text-purple-900 border-purple-200',
-                cardBg: isHoliday ? 'bg-rose-50/70 border-rose-200' : 'bg-white',
                 label: 'Pre-primary (Nursery & KG)',
               },
               Primary: {
                 border: 'border-emerald-300',
                 badgeBg: 'bg-emerald-100 text-emerald-900 border-emerald-200',
-                cardBg: isHoliday ? 'bg-rose-50/70 border-rose-200' : 'bg-white',
                 label: 'Primary (Classes 1 - 5)',
               },
               Secondary: {
                 border: 'border-amber-300',
                 badgeBg: 'bg-amber-100 text-amber-900 border-amber-200',
-                cardBg: isHoliday ? 'bg-rose-50/70 border-rose-200' : 'bg-white',
                 label: 'Secondary (Classes 6 - 10)',
               },
             }[cat];
@@ -678,35 +526,35 @@ function StaffKitchenContent() {
               return (
                 <div
                   key={cat}
-                  className={`p-5 rounded-3xl border-2 ${themeStyles.cardBg} ${themeStyles.border} shadow-2xs space-y-3 flex flex-col justify-between`}
+                  className={`p-5 sm:p-6 rounded-3xl border-2 bg-rose-50/70 border-rose-200 shadow-sm space-y-4 flex flex-col justify-between`}
                 >
-                  <div className="space-y-2">
+                  <div className="space-y-3">
                     <div className="flex items-center justify-between gap-2">
-                      <span className={`px-2.5 py-0.5 rounded-lg text-[10px] font-black uppercase tracking-wider border ${themeStyles.badgeBg}`}>
-                        {themeStyles.label}
+                      <span className={`px-2.5 py-0.5 rounded-lg text-[10px] font-black uppercase tracking-wider border ${theme.badgeBg}`}>
+                        {theme.label}
                       </span>
-                      <span className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-rose-100 text-rose-800 border border-rose-200">
+                      <span className="px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-rose-100 text-rose-800 border border-rose-200">
                         Holiday
                       </span>
                     </div>
 
                     <div className="pt-2 flex items-start gap-3">
-                      <div className="w-10 h-10 rounded-2xl bg-rose-100 text-rose-600 flex items-center justify-center shrink-0">
+                      <div className="w-11 h-11 rounded-2xl bg-rose-100 text-rose-600 flex items-center justify-center shrink-0 shadow-inner">
                         <CalendarOff className="w-5 h-5" />
                       </div>
-                      <div>
-                        <h3 className="text-base font-black text-slate-900 leading-snug">
+                      <div className="space-y-1">
+                        <h3 className="text-base sm:text-lg font-black text-slate-900 leading-snug">
                           {holidayReason}
                         </h3>
-                        <p className="text-xs text-slate-500 mt-1 leading-relaxed">
-                          School is closed for brunch on this date. No food preparation or parent ordering is required.
+                        <p className="text-xs text-slate-600 leading-relaxed">
+                          School is closed for brunch on this date for {cat}. No kitchen food preparation or student ordering is scheduled.
                         </p>
                       </div>
                     </div>
                   </div>
 
-                  <div className="pt-3 border-t border-rose-200/70 text-[11px] font-bold text-rose-700 flex items-center gap-1.5">
-                    <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                  <div className="pt-3 border-t border-rose-200/80 text-[11px] font-bold text-rose-700 flex items-center gap-1.5">
+                    <AlertCircle className="w-4 h-4 shrink-0" />
                     <span>Canteen Closed for Brunch</span>
                   </div>
                 </div>
@@ -716,57 +564,60 @@ function StaffKitchenContent() {
             return (
               <div
                 key={cat}
-                className={`p-5 rounded-3xl border-2 bg-white ${themeStyles.border} shadow-2xs space-y-3 flex flex-col justify-between`}
+                className={`p-5 sm:p-6 rounded-3xl border-2 bg-white ${theme.border} shadow-sm space-y-4 flex flex-col justify-between`}
               >
                 <div className="space-y-3">
                   <div className="flex items-center justify-between gap-2">
-                    <span className={`px-2.5 py-0.5 rounded-lg text-[10px] font-black uppercase tracking-wider border ${themeStyles.badgeBg}`}>
-                      {themeStyles.label}
+                    <span className={`px-2.5 py-0.5 rounded-lg text-[10px] font-black uppercase tracking-wider border ${theme.badgeBg}`}>
+                      {theme.label}
                     </span>
                     <VegBadge isVegetarian={true} />
                   </div>
 
-                  <div className="space-y-1">
-                    <h3 className="text-base sm:text-lg font-black text-slate-900 leading-tight">
+                  {/* Full Dish Name without unnecessary truncation */}
+                  <div className="space-y-1.5 pt-1">
+                    <h3 className="text-base sm:text-lg font-black text-slate-900 leading-snug">
                       {dishName}
                     </h3>
-                    <p className="text-xs text-slate-500 line-clamp-2 leading-relaxed">
+                    <p className="text-xs text-slate-500 leading-relaxed">
                       {catalogMeal?.description || 'Freshly prepared wholesome school brunch.'}
                     </p>
                   </div>
 
+                  {/* Scheduled Ingredients */}
                   {catalogMeal?.ingredients && (
-                    <div className="p-2.5 bg-slate-50 rounded-xl border border-slate-100 space-y-1">
-                      <div className="text-[10px] font-black text-slate-400 uppercase tracking-wider">
-                        Scheduled Ingredients:
+                    <div className="p-3 bg-slate-50 rounded-2xl border border-slate-100 space-y-1">
+                      <div className="text-[10px] font-black text-slate-500 uppercase tracking-wider">
+                        Scheduled Recipe Ingredients:
                       </div>
-                      <p className="text-[11px] text-slate-600 font-medium line-clamp-2">
+                      <p className="text-xs text-slate-700 font-medium leading-relaxed">
                         {catalogMeal.ingredients}
                       </p>
                     </div>
                   )}
 
+                  {/* Dietary Allergens */}
                   {catalogMeal?.allergens && (
-                    <div className="text-[10px] font-bold text-amber-700 bg-amber-50 border border-amber-200 px-2.5 py-1 rounded-lg">
-                      Allergens: {catalogMeal.allergens}
+                    <div className="text-[11px] font-bold text-amber-800 bg-amber-50 border border-amber-200 px-3 py-1.5 rounded-xl">
+                      Contains: {catalogMeal.allergens}
                     </div>
                   )}
                 </div>
 
-                <div className="pt-3 border-t border-slate-100 flex items-center justify-between text-[11px] font-bold">
+                <div className="pt-3 border-t border-slate-100 flex items-center justify-between text-xs font-bold">
                   {isPastDate ? (
-                    <span className="text-slate-400 flex items-center gap-1">
-                      <Clock className="w-3.5 h-3.5" />
-                      <span>Past Date (Closed)</span>
+                    <span className="text-slate-400 flex items-center gap-1.5">
+                      <Clock className="w-4 h-4" />
+                      <span>Past Service (Closed)</span>
                     </span>
                   ) : (
                     <span className="text-emerald-700 flex items-center gap-1.5">
                       <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-                      <span>Active for Student Ordering</span>
+                      <span>Official Timetable Dish</span>
                     </span>
                   )}
-                  <span className="px-2 py-0.5 bg-slate-100 text-slate-700 rounded-md text-[10px] font-black">
-                    Official Timetable
+                  <span className="px-2.5 py-1 bg-amber-100 text-amber-900 rounded-lg text-[10px] font-black uppercase tracking-wider">
+                    Excel Timetable
                   </span>
                 </div>
               </div>
@@ -774,233 +625,146 @@ function StaffKitchenContent() {
           })}
         </div>
 
-        {/* Clear Notice Explaining Automatic Timetable Workflow */}
-        <div className="p-3 bg-amber-100/60 border border-amber-200 rounded-2xl flex items-start gap-2.5 text-xs text-amber-950 font-medium">
+        {/* Operational Note for Kitchen Crew */}
+        <div className="p-3.5 bg-amber-100/70 border border-amber-200/90 rounded-2xl flex items-start gap-3 text-xs text-amber-950 font-medium">
           <Info className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
           <p>
-            <strong>Note for Canteen Team:</strong> The scheduled dish shown above is automatically active on the parent dashboard for each student category. You do <em>not</em> need to select random dishes from the recipe catalog below to make the official timetable appear.
+            <strong>Canteen Team Notice:</strong> The official timetable above automatically governs student orders for each grade category. You do <em>not</em> need to select items or checkboxes from the recipe catalog to make this timetable appear.
           </p>
         </div>
       </section>
 
       {/* ========================================================================= */}
-      {/* SECTION B: CANTEEN RECIPE CATALOG & CUSTOM MENU CONTROLS                  */}
+      {/* 4. SECTION B: MASTER RECIPE CATALOG (SEPARATE & COLLAPSIBLE)              */}
       {/* ========================================================================= */}
-      <section className="bg-white p-5 sm:p-6 rounded-3xl border border-slate-200 shadow-sm space-y-5">
-        {/* Section B Header */}
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
-          <div>
-            <div className="flex items-center gap-2">
-              <span className="text-[10px] font-black uppercase tracking-wider bg-slate-100 text-slate-700 px-2 py-0.5 rounded-md">
-                Master Database
-              </span>
-              <span className="text-xs font-bold text-slate-500">
-                {allMeals.length} Total Recipes
-              </span>
+      <section className="bg-white rounded-3xl border border-slate-200 shadow-sm overflow-hidden">
+        {/* Collapsible Header */}
+        <div
+          onClick={() => setIsCatalogExpanded(!isCatalogExpanded)}
+          className="p-5 sm:p-6 bg-slate-50/70 hover:bg-slate-100/70 transition-colors cursor-pointer flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-200 select-none"
+        >
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-2xl bg-amber-100 text-amber-700 flex items-center justify-center shrink-0">
+              <Layers className="w-5 h-5" />
             </div>
-            <h2 className="text-base sm:text-lg font-black text-slate-900 tracking-tight mt-0.5 flex items-center gap-2">
-              <Layers className="w-5 h-5 text-amber-500" />
-              <span>Food Item Catalog & Recipe Controls</span>
-            </h2>
-            <p className="text-xs text-slate-500 mt-0.5">
-              Add new dishes, update recipes, or adjust catalog pricing. This catalog stores all canteen culinary records.
-            </p>
-          </div>
-
-          <div className="flex items-center gap-2 flex-wrap">
-            <button
-              type="button"
-              onClick={() => setIsAddModalOpen(true)}
-              className="px-3.5 py-2 bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 rounded-xl text-xs font-black transition-colors flex items-center gap-1.5 cursor-pointer shadow-2xs"
-            >
-              <Plus className="w-3.5 h-3.5 text-amber-600" />
-              <span>Add New Item</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={handleSaveTomorrowMenu}
-              disabled={savingTomorrow || !hasUnsavedChanges}
-              title={!hasUnsavedChanges ? 'No unsaved custom changes' : 'Save custom changes for this date'}
-              className="px-4 py-2 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-white rounded-xl text-xs font-black transition-all flex items-center gap-1.5 shadow-sm disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:from-amber-500 disabled:hover:to-orange-500 disabled:shadow-none"
-            >
-              {savingTomorrow ? (
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-              ) : (
-                <Save className="w-3.5 h-3.5" />
-              )}
-              <span>Save Catalog Changes</span>
-            </button>
-          </div>
-        </div>
-
-        {/* Search Field & Category Filter Pills */}
-        <div className="space-y-3">
-          <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
-            {/* Search Input */}
-            <div className="relative flex-1">
-              <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-              <input
-                type="text"
-                value={tomorrowSearch}
-                onChange={(e) => setTomorrowSearch(e.target.value)}
-                placeholder="Search recipe catalog by name..."
-                className="w-full pl-9 pr-8 py-2 bg-slate-50 focus:bg-white border border-slate-200 focus:border-amber-500 rounded-xl text-xs sm:text-sm font-semibold focus:outline-hidden focus:ring-2 focus:ring-amber-500/20 text-slate-900 transition-all placeholder:text-slate-400"
-              />
-              {tomorrowSearch && (
-                <button
-                  type="button"
-                  onClick={() => setTomorrowSearch('')}
-                  className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-slate-600 rounded-full hover:bg-slate-200 transition-colors"
-                >
-                  <X className="w-3.5 h-3.5" />
-                </button>
-              )}
-            </div>
-
-            {/* Quick Select All / Deselect All */}
-            <div className="flex items-center gap-2 self-end sm:self-auto shrink-0">
-              <button
-                type="button"
-                onClick={handleSelectAll}
-                className="px-2.5 py-1.5 rounded-lg text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-700 transition-colors flex items-center gap-1 cursor-pointer"
-              >
-                <CheckSquare className="w-3.5 h-3.5 text-amber-600" />
-                <span>Select All</span>
-              </button>
-              <button
-                type="button"
-                onClick={handleDeselectAll}
-                className="px-2.5 py-1.5 rounded-lg text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-700 transition-colors flex items-center gap-1 cursor-pointer"
-              >
-                <Square className="w-3.5 h-3.5 text-slate-500" />
-                <span>Deselect All</span>
-              </button>
-            </div>
-          </div>
-
-          {/* Category Filter Pills */}
-          <div className="flex items-center gap-1.5 overflow-x-auto pb-1 scrollbar-none">
-            <button
-              type="button"
-              onClick={() => setTomorrowCategoryFilter('ALL')}
-              className={`px-3 py-1 rounded-xl text-xs font-bold transition-all shrink-0 cursor-pointer ${
-                tomorrowCategoryFilter === 'ALL'
-                  ? 'bg-amber-500 text-white shadow-2xs'
-                  : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-              }`}
-            >
-              All Items ({allMeals.length})
-            </button>
-            {availableCategories.map((cat) => {
-              const count = allMeals.filter(
-                (m) => getDisplayCategory(m.category) === cat
-              ).length;
-              return (
-                <button
-                  key={cat}
-                  type="button"
-                  onClick={() => setTomorrowCategoryFilter(cat)}
-                  className={`px-3 py-1 rounded-xl text-xs font-bold transition-all shrink-0 cursor-pointer ${
-                    tomorrowCategoryFilter === cat
-                      ? 'bg-amber-500 text-white shadow-2xs'
-                      : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                  }`}
-                >
-                  {cat.charAt(0) + cat.slice(1).toLowerCase()} ({count})
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        {/* Meals Grouped by Category */}
-        {loadingTomorrow ? (
-          <div className="min-h-[25vh] flex items-center justify-center">
-            <div className="w-8 h-8 border-4 border-amber-500 border-t-transparent rounded-full animate-spin" />
-          </div>
-        ) : filteredMeals.length === 0 ? (
-          <div className="bg-slate-50 rounded-2xl border border-dashed border-slate-300 p-8 text-center space-y-2">
-            <UtensilsCrossed className="w-10 h-10 mx-auto text-slate-300" />
-            <h3 className="font-extrabold text-slate-800 text-sm">No Food Items Found</h3>
-            <p className="text-xs text-slate-500">
-              {tomorrowSearch
-                ? `No items match "${tomorrowSearch}". Try clearing search.`
-                : 'Click "Add New Item" to create items in your canteen menu.'}
-            </p>
-          </div>
-        ) : (
-          <div className="space-y-4">
-            {Object.entries(groupedMeals).map(([catName, mealsInGroup]) => (
-              <div key={catName} className="space-y-2.5">
-                <div className="flex items-center justify-between px-1">
-                  <h4 className="text-xs font-extrabold uppercase tracking-wider text-slate-600 flex items-center gap-1.5">
-                    <span className="w-2 h-2 rounded-full bg-amber-500" />
-                    <span>{catName}</span>
-                    <span className="text-slate-400 font-semibold">
-                      ({mealsInGroup.length})
-                    </span>
-                  </h4>
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                  {mealsInGroup.map((meal) => {
-                    const isSelected = selectedMealIds.includes(meal.id);
-
-                    return (
-                      <div
-                        key={meal.id}
-                        onClick={() => handleToggleMeal(meal.id)}
-                        className={`p-3 rounded-2xl border transition-all cursor-pointer flex items-center justify-between gap-3 select-none ${
-                          isSelected
-                            ? 'bg-amber-50/70 border-amber-400 shadow-2xs ring-1 ring-amber-300/60'
-                            : 'bg-white border-slate-200 hover:border-slate-300 hover:bg-slate-50/60 shadow-2xs'
-                        }`}
-                      >
-                        {/* Left: Checkbox + Icon + Info */}
-                        <div className="flex items-center gap-3 min-w-0 flex-1">
-                          <div className="shrink-0">
-                            <div
-                              className={`w-6 h-6 rounded-lg flex items-center justify-center border transition-all ${
-                                isSelected
-                                  ? 'bg-amber-500 border-amber-600 text-white shadow-2xs'
-                                  : 'bg-white border-slate-300 text-transparent'
-                              }`}
-                            >
-                              <Check className="w-4 h-4 stroke-[3]" />
-                            </div>
-                          </div>
-
-                          <div className="min-w-0 flex-1">
-                            <div className="flex items-center gap-1.5">
-                              <h5 className="font-extrabold text-xs sm:text-sm text-slate-900 truncate">
-                                {meal.name}
-                              </h5>
-                              <VegBadge isVegetarian={meal.isVegetarian} />
-                            </div>
-                            <div className="flex items-center gap-2 mt-0.5 text-[11px] text-slate-500">
-                              <span className="font-bold text-slate-700">₹{formatINR(meal.price)}</span>
-                              <span>•</span>
-                              <span className="capitalize">{meal.category?.toLowerCase() || 'Lunch'}</span>
-                            </div>
-                          </div>
-                        </div>
-
-                        {/* Right: Edit Button */}
-                        <button
-                          type="button"
-                          onClick={(e) => handleOpenEdit(meal, e)}
-                          className="p-2 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-xl transition-colors shrink-0"
-                          title="Edit recipe details"
-                        >
-                          <Edit2 className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
-                    );
-                  })}
-                </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <h2 className="text-base sm:text-lg font-black text-slate-900">
+                  Master Recipe Catalog & Culinary Reference
+                </h2>
+                <span className="px-2 py-0.5 rounded-md text-[10px] font-black uppercase tracking-wider bg-slate-200 text-slate-700">
+                  {allMeals.length} Recipes
+                </span>
               </div>
-            ))}
+              <p className="text-xs text-slate-500 mt-0.5">
+                Kitchen culinary database for reviewing recipe ingredients and prep notes. (Does not override the daily timetable).
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 self-end sm:self-auto">
+            <span className="text-xs font-bold text-slate-600">
+              {isCatalogExpanded ? 'Hide Catalog' : 'View Catalog'}
+            </span>
+            <div className="p-1 rounded-lg bg-white border border-slate-200 text-slate-600">
+              {isCatalogExpanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+            </div>
+          </div>
+        </div>
+
+        {/* Collapsible Content */}
+        {isCatalogExpanded && (
+          <div className="p-5 sm:p-6 space-y-5 animate-in fade-in duration-200">
+            {/* Search, Filter, and Add Controls */}
+            <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
+              {/* Search Field */}
+              <div className="relative flex-1">
+                <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <input
+                  type="text"
+                  value={catalogSearch}
+                  onChange={(e) => setCatalogSearch(e.target.value)}
+                  placeholder="Search recipe catalog by dish name..."
+                  className="w-full pl-9 pr-8 py-2 bg-slate-50 focus:bg-white border border-slate-200 focus:border-amber-500 rounded-xl text-xs sm:text-sm font-semibold focus:outline-hidden text-slate-900 transition-all placeholder:text-slate-400"
+                />
+                {catalogSearch && (
+                  <button
+                    type="button"
+                    onClick={() => setCatalogSearch('')}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-slate-600 rounded-full hover:bg-slate-200 transition-colors"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+
+              {/* Add New Item Button */}
+              <button
+                type="button"
+                onClick={() => setIsAddModalOpen(true)}
+                className="px-4 py-2 bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 rounded-xl text-xs font-black transition-colors flex items-center justify-center gap-1.5 cursor-pointer shadow-2xs shrink-0"
+              >
+                <Plus className="w-4 h-4 text-amber-600" />
+                <span>Add New Recipe</span>
+              </button>
+            </div>
+
+            {/* Catalog Grid */}
+            {loadingMeals ? (
+              <div className="py-12 flex items-center justify-center">
+                <div className="w-8 h-8 border-4 border-amber-500 border-t-transparent rounded-full animate-spin" />
+              </div>
+            ) : filteredCatalogMeals.length === 0 ? (
+              <div className="bg-slate-50 rounded-2xl border border-dashed border-slate-300 p-8 text-center space-y-2">
+                <UtensilsCrossed className="w-8 h-8 mx-auto text-slate-300" />
+                <h4 className="font-extrabold text-slate-700 text-sm">No Recipes Found</h4>
+                <p className="text-xs text-slate-500">
+                  {catalogSearch ? `No recipes match "${catalogSearch}".` : 'No recipes in catalog.'}
+                </p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5">
+                {filteredCatalogMeals.map((meal) => (
+                  <div
+                    key={meal.id}
+                    className="p-4 bg-white rounded-2xl border border-slate-200 hover:border-slate-300 hover:shadow-xs transition-all flex flex-col justify-between gap-3"
+                  >
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-[10px] font-black uppercase tracking-wider text-slate-500 bg-slate-100 px-2 py-0.5 rounded-md">
+                          {meal.category || 'Lunch'}
+                        </span>
+                        <VegBadge isVegetarian={meal.isVegetarian} />
+                      </div>
+
+                      <h4 className="font-black text-sm text-slate-900 leading-snug">
+                        {meal.name}
+                      </h4>
+
+                      {meal.ingredients && (
+                        <p className="text-[11px] text-slate-500 line-clamp-2 leading-relaxed">
+                          {meal.ingredients}
+                        </p>
+                      )}
+                    </div>
+
+                    <div className="pt-3 border-t border-slate-100 flex items-center justify-between text-xs">
+                      <span className="text-[11px] font-extrabold text-slate-700">
+                        Authorized Rate: ₹{formatINR(meal.price || 80)}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={(e) => handleOpenEdit(meal, e)}
+                        className="p-1.5 text-slate-400 hover:text-slate-800 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
+                        title="Edit recipe"
+                      >
+                        <Edit2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
       </section>
@@ -1015,13 +779,13 @@ function StaffKitchenContent() {
             <div className="p-4 sm:p-6 border-b border-slate-100 flex items-center justify-between">
               <div>
                 <span className="px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-amber-100 text-amber-800">
-                  Authoritative Timetable
+                  Spreadsheet Timetable
                 </span>
                 <h2 className="text-lg sm:text-xl font-extrabold text-slate-900 mt-1">
-                  Complete October 2026 School Brunch Schedule
+                  October 2026 Brunch Timetable (All 31 Dates)
                 </h2>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  Full 31-day school brunch timetable for Pre-primary, Primary, and Secondary.
+                  Click any date row to load that day&apos;s full schedule on the main kitchen view.
                 </p>
               </div>
 
@@ -1036,7 +800,7 @@ function StaffKitchenContent() {
 
             {/* Modal Content Table */}
             <div className="p-4 sm:p-6 overflow-y-auto space-y-3 flex-1">
-              <div className="divide-y divide-slate-100 border border-slate-150 rounded-2xl overflow-hidden">
+              <div className="divide-y divide-slate-100 border border-slate-200 rounded-2xl overflow-hidden">
                 {OCTOBER_2026_TIMETABLE.map((day) => {
                   const isDayPast = day.date < todayDateStr;
                   const isDayToday = day.date === todayDateStr;
@@ -1102,7 +866,7 @@ function StaffKitchenContent() {
 
             {/* Modal Footer */}
             <div className="p-4 border-t border-slate-100 flex items-center justify-between text-xs text-slate-500">
-              <span>Click any date row to inspect its full details.</span>
+              <span>Click any date to inspect its full production view.</span>
               <button
                 type="button"
                 onClick={() => setIsTimetableModalOpen(false)}
@@ -1126,7 +890,7 @@ function StaffKitchenContent() {
                 <div className="w-8 h-8 rounded-xl bg-amber-100 text-amber-700 flex items-center justify-center">
                   <Plus className="w-4 h-4" />
                 </div>
-                <h3 className="font-extrabold text-base text-slate-900">Add New Food Item</h3>
+                <h3 className="font-extrabold text-base text-slate-900">Add New Recipe</h3>
               </div>
               <button
                 type="button"
@@ -1140,14 +904,14 @@ function StaffKitchenContent() {
             <form onSubmit={handleCreateNewMeal} className="space-y-3.5">
               <div>
                 <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Food Item Name <span className="text-rose-500">*</span>
+                  Recipe Name <span className="text-rose-500">*</span>
                 </label>
                 <input
                   type="text"
                   required
                   value={newMealName}
                   onChange={(e) => setNewMealName(e.target.value)}
-                  placeholder="e.g. Veg Pulao with Raita"
+                  placeholder="e.g. Vegetable Khichdi + Curd"
                   className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs sm:text-sm font-semibold text-slate-900 focus:outline-hidden focus:border-amber-500"
                 />
               </div>
@@ -1155,7 +919,7 @@ function StaffKitchenContent() {
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block text-xs font-bold text-slate-700 mb-1">
-                    Price (₹) <span className="text-rose-500">*</span>
+                    Rate (₹) <span className="text-rose-500">*</span>
                   </label>
                   <input
                     type="number"
@@ -1164,7 +928,6 @@ function StaffKitchenContent() {
                     step="1"
                     value={newMealPrice}
                     onChange={(e) => setNewMealPrice(e.target.value)}
-                    placeholder="80"
                     className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs sm:text-sm font-semibold text-slate-900 focus:outline-hidden focus:border-amber-500"
                   />
                 </div>
@@ -1184,31 +947,12 @@ function StaffKitchenContent() {
                 </div>
               </div>
 
-              {/* Vegetarian Toggle */}
               <div className="flex items-center justify-between p-3 bg-slate-50 rounded-xl border border-slate-200">
-                <span className="text-xs font-bold text-slate-700">Vegetarian Dish</span>
+                <span className="text-xs font-bold text-slate-700">Vegetarian Recipe</span>
                 <input
                   type="checkbox"
                   checked={newMealIsVeg}
                   onChange={(e) => setNewMealIsVeg(e.target.checked)}
-                  className="w-4 h-4 rounded-md text-amber-600 focus:ring-amber-500 cursor-pointer"
-                />
-              </div>
-
-              {/* Available for Tomorrow Checkbox */}
-              <div className="flex items-center justify-between p-3 bg-amber-50/70 rounded-xl border border-amber-200">
-                <div>
-                  <span className="text-xs font-extrabold text-amber-900 block">
-                    Available in Kitchen Catalog
-                  </span>
-                  <span className="text-[10px] text-amber-700 font-medium">
-                    Include in active kitchen items
-                  </span>
-                </div>
-                <input
-                  type="checkbox"
-                  checked={newMealAvailableTomorrow}
-                  onChange={(e) => setNewMealAvailableTomorrow(e.target.checked)}
                   className="w-4 h-4 rounded-md text-amber-600 focus:ring-amber-500 cursor-pointer"
                 />
               </div>
@@ -1227,7 +971,7 @@ function StaffKitchenContent() {
                   className="px-5 py-2 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-white rounded-xl text-xs font-black transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50 shadow-sm"
                 >
                   {creatingMeal ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : null}
-                  <span>Add Item</span>
+                  <span>Add Recipe</span>
                 </button>
               </div>
             </form>
@@ -1236,9 +980,9 @@ function StaffKitchenContent() {
       )}
 
       {/* ========================================================================= */}
-      {/* MODAL: Edit Existing Food Item                                            */}
+      {/* MODAL: Edit Food Item                                                     */}
       {/* ========================================================================= */}
-      {isEditModalOpen && editingMeal && (
+      {isEditModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
           <div className="bg-white rounded-3xl max-w-md w-full p-6 shadow-2xl space-y-4 animate-in fade-in zoom-in-95 duration-150">
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
@@ -1247,7 +991,7 @@ function StaffKitchenContent() {
                   <Edit2 className="w-4 h-4" />
                 </div>
                 <h3 className="font-extrabold text-base text-slate-900">
-                  Edit Food Item
+                  Edit Recipe Details
                 </h3>
               </div>
               <button
@@ -1262,7 +1006,7 @@ function StaffKitchenContent() {
             <form onSubmit={handleUpdateMeal} className="space-y-3.5">
               <div>
                 <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Food Item Name <span className="text-rose-500">*</span>
+                  Recipe Name <span className="text-rose-500">*</span>
                 </label>
                 <input
                   type="text"
@@ -1276,7 +1020,7 @@ function StaffKitchenContent() {
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block text-xs font-bold text-slate-700 mb-1">
-                    Price (₹) <span className="text-rose-500">*</span>
+                    Rate (₹) <span className="text-rose-500">*</span>
                   </label>
                   <input
                     type="number"
@@ -1295,7 +1039,7 @@ function StaffKitchenContent() {
                   </label>
                   <select
                     value={editMealCategory}
-                    onChange={(e) => setNewMealCategory(e.target.value)}
+                    onChange={(e) => setEditMealCategory(e.target.value)}
                     className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs sm:text-sm font-semibold text-slate-900 focus:outline-hidden focus:border-amber-500"
                   >
                     <option value="LUNCH">Lunch</option>
@@ -1304,9 +1048,8 @@ function StaffKitchenContent() {
                 </div>
               </div>
 
-              {/* Vegetarian Toggle */}
               <div className="flex items-center justify-between p-3 bg-slate-50 rounded-xl border border-slate-200">
-                <span className="text-xs font-bold text-slate-700">Vegetarian Dish</span>
+                <span className="text-xs font-bold text-slate-700">Vegetarian Recipe</span>
                 <input
                   type="checkbox"
                   checked={editMealIsVeg}
