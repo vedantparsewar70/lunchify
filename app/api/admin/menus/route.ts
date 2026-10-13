@@ -4,6 +4,7 @@ import { getCurrentUser } from '@/lib/auth';
 
 import { ensureTomorrowMenuReset } from '@/lib/menu-schedule';
 import { getOffsetDateString, APP_TIMEZONE } from '@/lib/utils';
+import { getStudentCategory } from '@/lib/october-2026-timetable';
 
 export async function GET(req: Request) {
   try {
@@ -18,7 +19,8 @@ export async function GET(req: Request) {
 
     let whereClause: any = date ? { date } : {};
     if (category && category !== 'ALL') {
-      whereClause.studentCategory = { in: [category, 'ALL'] };
+      const normalizedCat = getStudentCategory(undefined, category);
+      whereClause.studentCategory = { in: [normalizedCat, category, 'ALL'] };
     }
 
     const menus = await prisma.menu.findMany({

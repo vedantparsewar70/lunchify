@@ -942,16 +942,26 @@ export class FirestoreDbAdapter {
       }
 
       if (where?.studentCategory) {
+        const normalize = (val: string) => {
+          const clean = String(val).trim().toLowerCase();
+          if (clean.includes('pre')) return 'Pre-primary';
+          if (clean.includes('sec')) return 'Secondary';
+          if (clean.includes('pri')) return 'Primary';
+          return val;
+        };
+
         if (typeof where.studentCategory === 'string') {
+          const target = normalize(where.studentCategory);
           list = list.filter(
             (m: any) =>
               !m.studentCategory ||
               m.studentCategory === 'ALL' ||
-              m.studentCategory === where.studentCategory
+              normalize(m.studentCategory) === target
           );
         } else if (where.studentCategory?.in && Array.isArray(where.studentCategory.in)) {
-          const catSet = new Set([...where.studentCategory.in, 'ALL']);
-          list = list.filter((m: any) => !m.studentCategory || catSet.has(m.studentCategory));
+          const normalizedTargets = new Set(where.studentCategory.in.map(normalize));
+          normalizedTargets.add('ALL');
+          list = list.filter((m: any) => !m.studentCategory || normalizedTargets.has(normalize(m.studentCategory)));
         }
       }
 

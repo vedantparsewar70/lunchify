@@ -349,9 +349,9 @@ export default function AdminMenuPage() {
             <span className="text-xs font-bold text-slate-500">Category:</span>
             {[
               { id: 'ALL', label: 'All Students' },
-              { id: 'PRE_PRIMARY', label: 'Pre-primary' },
-              { id: 'PRIMARY', label: 'Primary' },
-              { id: 'SECONDARY', label: 'Secondary' },
+              { id: 'Pre-primary', label: 'Pre-primary' },
+              { id: 'Primary', label: 'Primary' },
+              { id: 'Secondary', label: 'Secondary' },
             ].map((cat) => (
               <button
                 key={cat.id}

@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import prisma from '@/lib/prisma';
 import { getCurrentUser } from '@/lib/auth';
+import { getStudentCategory } from '@/lib/october-2026-timetable';
 
 export const dynamic = 'force-dynamic';
 
@@ -19,10 +20,12 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'Date and selectedMealIds array are required' }, { status: 400 });
     }
 
+    const normalizedCat = targetCategory && targetCategory !== 'ALL' ? getStudentCategory(undefined, targetCategory) : undefined;
+
     // 1. Fetch existing menus for this date (optionally filtered by studentCategory)
     let whereClause: any = { date };
-    if (targetCategory && targetCategory !== 'ALL') {
-      whereClause.studentCategory = targetCategory;
+    if (normalizedCat) {
+      whereClause.studentCategory = normalizedCat;
     }
 
     const existingMenus = await prisma.menu.findMany({
@@ -60,7 +63,7 @@ export async function POST(req: Request) {
             create: {
               mealId,
               date,
-              studentCategory: (targetCategory && targetCategory !== 'ALL') ? targetCategory : 'ALL',
+              studentCategory: normalizedCat || 'ALL',
               availableQuantity: 50,
               maxQuantity: 50,
               orderingDeadline: '08:30',

@@ -16,6 +16,13 @@ import {
   CheckCircle2,
   AlertCircle,
   Check,
+  CalendarDays,
+  CalendarOff,
+  Clock,
+  Layers,
+  Sparkles,
+  Info,
+  Calendar,
 } from 'lucide-react';
 import VegBadge from '@/components/VegBadge';
 import MealIcon from '@/components/MealIcon';
@@ -24,14 +31,21 @@ import { formatDatePretty, getTodayString, getOffsetDateString, formatINR } from
 import { useToast } from '@/components/ToastContext';
 import { useSyncWatcher, broadcastSyncEvent } from '@/lib/client-sync';
 import { MealData } from '@/types';
+import {
+  OCTOBER_2026_TIMETABLE,
+  OCTOBER_2026_MEAL_CATALOG,
+  getStudentCategory,
+  StudentCategory,
+} from '@/lib/october-2026-timetable';
 
 function StaffKitchenContent() {
   const { showToast } = useToast();
   const [todayDateStr, setTodayDateStr] = useState(() => getTodayString());
   const [tomorrowDateStr, setTomorrowDateStr] = useState(() => getOffsetDateString(1));
-  const [selectedDateStr, setSelectedDateStr] = useState(() => getOffsetDateString(1));
+  const [selectedDateStr, setSelectedDateStr] = useState(() => getTodayString());
   const [selectedStudentCategory, setSelectedStudentCategory] = useState<string>('ALL');
   const [currentDayMenus, setCurrentDayMenus] = useState<any[]>([]);
+  const [isTimetableModalOpen, setIsTimetableModalOpen] = useState(false);
 
   // --- Tomorrow's Complete Menu State ---
   const [allMeals, setAllMeals] = useState<MealData[]>([]);
@@ -132,11 +146,11 @@ function StaffKitchenContent() {
         setInitialSavedMealIds([]);
 
         showToast(
-          '12:00 AM Rollover: All meals unticked for the new day. Please select tomorrow\'s menu.',
+          '12:00 AM Rollover: New school day active.',
           'info'
         );
 
-        fetchTomorrowMenuData(newTomorrow);
+        fetchTomorrowMenuData(newToday);
         scheduleMidnight();
       }, msUntilMidnight);
     };
@@ -154,11 +168,11 @@ function StaffKitchenContent() {
         setInitialSavedMealIds([]);
 
         showToast(
-          'Date changed: All meals unticked for the new day. Please select tomorrow\'s menu.',
+          'Date changed: Updated to current school day.',
           'info'
         );
 
-        fetchTomorrowMenuData(newTomorrow);
+        fetchTomorrowMenuData(currentToday);
       }
     }, 15000);
 
@@ -248,7 +262,7 @@ function StaffKitchenContent() {
     const visibleIds = filteredMeals.map((m) => m.id);
     const combined = Array.from(new Set([...selectedMealIds, ...visibleIds]));
     setSelectedMealIds(combined);
-    showToast(`Selected all ${visibleIds.length} visible items for tomorrow`, 'info');
+    showToast(`Selected all ${visibleIds.length} visible items`, 'info');
   };
 
   const handleDeselectAll = () => {
@@ -283,7 +297,7 @@ function StaffKitchenContent() {
         setInitialSavedMealIds([...selectedMealIds]);
         broadcastSyncEvent('MENU_UPDATED');
         showToast(
-          `Menu for ${formatDatePretty(selectedDateStr)} saved! ${selectedMealIds.length} items will be available for parents.`,
+          `Custom menu adjustments for ${formatDatePretty(selectedDateStr)} saved!`,
           'success'
         );
       } else {
@@ -341,9 +355,7 @@ function StaffKitchenContent() {
         broadcastSyncEvent('MENU_UPDATED');
 
         showToast(
-          `"${createdMeal.name}" added to menu catalog${
-            newMealAvailableTomorrow ? ' and selected for tomorrow' : ''
-          }!`,
+          `"${createdMeal.name}" added to menu catalog!`,
           'success'
         );
 
@@ -438,26 +450,60 @@ function StaffKitchenContent() {
     }
   };
 
+  // Date context flags
+  const isPastDate = selectedDateStr < todayDateStr;
+  const isToday = selectedDateStr === todayDateStr;
+  const isTomorrow = selectedDateStr === tomorrowDateStr;
+
+  // Resolve official timetable day entry
+  const officialDayEntry = useMemo(() => {
+    return OCTOBER_2026_TIMETABLE.find((d) => d.date === selectedDateStr) || null;
+  }, [selectedDateStr]);
+
+  // Which student categories to display in the official timetable section
+  const categoriesToDisplay: StudentCategory[] = useMemo(() => {
+    if (selectedStudentCategory === 'ALL') {
+      return ['Pre-primary', 'Primary', 'Secondary'];
+    }
+    const normalized = getStudentCategory(undefined, selectedStudentCategory);
+    return [normalized];
+  }, [selectedStudentCategory]);
+
   return (
-    <div className="max-w-3xl mx-auto px-4 py-5 space-y-5 print:p-0 print:m-0 pb-28 sm:pb-12">
+    <div className="max-w-4xl mx-auto px-4 py-5 space-y-6 print:p-0 print:m-0 pb-28 sm:pb-16">
       {/* Canteen Staff Header */}
-      <div className="flex items-center justify-between pb-3 border-b border-slate-200 print:hidden">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-200 print:hidden">
         <div>
-          <span className="text-[10px] font-extrabold uppercase tracking-widest text-amber-600 bg-amber-50 px-2 py-0.5 rounded-md">
-            Canteen Kitchen Staff
-          </span>
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] font-black uppercase tracking-widest text-amber-700 bg-amber-100/90 px-2.5 py-0.5 rounded-md">
+              Canteen Operations & Timetable
+            </span>
+            <span className="text-xs text-slate-500 font-semibold">S.B. Patil School</span>
+          </div>
           <h1 className="text-xl sm:text-2xl font-black text-slate-900 tracking-tight mt-1 flex items-center gap-2">
             <ChefHat className="w-6 h-6 text-amber-500" />
-            <span>Student Menu</span>
+            <span>Student Menu Management</span>
           </h1>
+          <p className="text-xs text-slate-500 mt-0.5">
+            Review scheduled October 2026 timetable meals for student categories and manage kitchen recipe catalog.
+          </p>
         </div>
 
-        <div className="flex items-center gap-1.5">
+        <div className="flex items-center gap-2 self-start sm:self-auto">
+          <button
+            type="button"
+            onClick={() => setIsTimetableModalOpen(true)}
+            className="inline-flex items-center gap-1.5 px-3 py-2 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-white rounded-xl text-xs font-black shadow-2xs transition-all cursor-pointer"
+          >
+            <Calendar className="w-3.5 h-3.5" />
+            <span>Full Month Timetable</span>
+          </button>
+
           <button
             onClick={() => fetchTomorrowMenuData()}
             disabled={loadingTomorrow}
-            className="p-2.5 bg-white border border-slate-200 rounded-xl hover:bg-slate-50 text-slate-700 transition-colors shadow-2xs cursor-pointer"
-            title="Refresh"
+            className="p-2 bg-white border border-slate-200 rounded-xl hover:bg-slate-50 text-slate-700 transition-colors shadow-2xs cursor-pointer"
+            title="Refresh menu data"
           >
             <RefreshCw
               className={`w-4 h-4 ${loadingTomorrow ? 'animate-spin text-amber-500' : ''}`}
@@ -465,194 +511,341 @@ function StaffKitchenContent() {
           </button>
         </div>
       </div>
-        <div className="space-y-4">
-          {/* Header Summary & Actions Toolbar */}
-          <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-2xs space-y-3">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
-              <div>
-                <div className="flex items-center gap-2">
-                  <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">
-                    Menu Timetable & Availability
-                  </span>
-                  {hasUnsavedChanges ? (
-                    <span className="text-[10px] font-extrabold bg-amber-100 text-amber-900 border border-amber-300 px-2 py-0.5 rounded-full flex items-center gap-1">
-                      <AlertCircle className="w-3 h-3 text-amber-600" />
-                      <span>Unsaved Changes</span>
-                    </span>
-                  ) : (
-                    <span className="text-[10px] font-extrabold bg-emerald-100 text-emerald-800 border border-emerald-300 px-2 py-0.5 rounded-full flex items-center gap-1">
-                      <CheckCircle2 className="w-3 h-3 text-emerald-600" />
-                      <span>Saved</span>
-                    </span>
-                  )}
-                </div>
-                <h3 className="text-lg font-black text-slate-900 mt-0.5">
-                  {formatDatePretty(selectedDateStr)}
-                </h3>
-                <p className="text-xs text-slate-500 mt-0.5 font-medium">
-                  <strong className="text-amber-600 font-bold">{selectedMealIds.length}</strong> of{' '}
-                  <strong className="text-slate-800">{allMeals.length}</strong> items available for
-                  parents to order ({selectedStudentCategory === 'ALL' ? 'All Categories' : selectedStudentCategory}).
-                </p>
-              </div>
 
-              {/* Action Buttons: Add Item & Save */}
-              <div className="flex items-center gap-2 flex-wrap">
-                <button
-                  type="button"
-                  onClick={() => setIsAddModalOpen(true)}
-                  className="px-3 py-2 bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 rounded-xl text-xs font-extrabold transition-colors flex items-center gap-1.5 cursor-pointer shadow-2xs"
-                >
-                  <Plus className="w-3.5 h-3.5 text-amber-600" />
-                  <span>Add New Item</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={handleSaveTomorrowMenu}
-                  disabled={savingTomorrow || !hasUnsavedChanges}
-                  title={!hasUnsavedChanges ? "No changes to save" : "Save menu for this date"}
-                  className="px-4 py-2 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-white rounded-xl text-xs font-black transition-all flex items-center gap-1.5 shadow-sm disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:from-amber-500 disabled:hover:to-orange-500 disabled:shadow-none"
-                >
-                  {savingTomorrow ? (
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                  ) : (
-                    <Save className="w-3.5 h-3.5" />
-                  )}
-                  <span>Save Menu</span>
-                </button>
-              </div>
-            </div>
-
-            {/* Date and Category Selector Controls */}
-            <div className="pt-2 border-t border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
-              <div className="flex items-center gap-2 flex-wrap">
-                <span className="font-bold text-slate-500 text-[11px]">Date:</span>
-                <button
-                  type="button"
-                  onClick={() => setSelectedDateStr(tomorrowDateStr)}
-                  className={`px-2.5 py-1 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-                    selectedDateStr === tomorrowDateStr
-                      ? 'bg-amber-500 text-white shadow-xs'
-                      : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
-                  }`}
-                >
-                  Tomorrow
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setSelectedDateStr(todayDateStr)}
-                  className={`px-2.5 py-1 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-                    selectedDateStr === todayDateStr
-                      ? 'bg-amber-500 text-white shadow-xs'
-                      : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
-                  }`}
-                >
-                  Today
-                </button>
-                <input
-                  type="date"
-                  value={selectedDateStr}
-                  min="2026-10-01"
-                  max="2026-10-31"
-                  onChange={(e) => setSelectedDateStr(e.target.value)}
-                  className="text-xs font-bold text-slate-800 bg-slate-50 border border-slate-200 rounded-xl px-2.5 py-1 focus:outline-hidden"
-                />
-              </div>
-
-              {/* Student Category Selector */}
-              <div className="flex items-center gap-1.5 overflow-x-auto pb-1 sm:pb-0">
-                <span className="font-bold text-slate-500 text-[11px]">Category:</span>
-                {[
-                  { id: 'ALL', label: 'All' },
-                  { id: 'PRE_PRIMARY', label: 'Pre-primary' },
-                  { id: 'PRIMARY', label: 'Primary' },
-                  { id: 'SECONDARY', label: 'Secondary' },
-                ].map((cat) => (
-                  <button
-                    key={cat.id}
-                    type="button"
-                    onClick={() => setSelectedStudentCategory(cat.id)}
-                    className={`px-2.5 py-1 rounded-xl text-xs font-bold transition-all shrink-0 cursor-pointer ${
-                      selectedStudentCategory === cat.id
-                        ? 'bg-amber-500 text-white shadow-xs'
-                        : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                    }`}
-                  >
-                    {cat.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Holiday Notice if Present */}
-            {currentDayMenus.some((m) => m.isHoliday) && (
-              <div className="bg-purple-100/90 border border-purple-300 rounded-xl p-3 flex items-center gap-2.5 text-purple-950 text-xs">
-                <AlertCircle className="w-4 h-4 text-purple-600 shrink-0" />
-                <div>
-                  <span className="font-black">Holiday — No Brunch:</span>{' '}
-                  <span>
-                    {currentDayMenus.find((m) => m.isHoliday)?.holidayReason || 'School Holiday'}
-                  </span>
-                </div>
-              </div>
-            )}
-
-            {/* Quick Select All / Deselect All Controls */}
-            <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-xs">
-              <span className="text-slate-500 font-semibold text-[11px]">
-                Showing {filteredMeals.length} items
-              </span>
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={handleSelectAll}
-                  title={isAllVisibleSelected ? "All visible items are selected" : "Select all visible items"}
-                  className={`min-w-[90px] justify-center px-2.5 py-1 rounded-lg text-[11px] flex items-center gap-1 border transition-all duration-200 active:scale-95 cursor-pointer ${
-                    actionFeedback === 'select'
-                      ? 'bg-emerald-100 text-emerald-800 border-emerald-400 ring-2 ring-emerald-300/60 scale-[0.98] font-black shadow-xs'
-                      : isAllVisibleSelected
-                      ? 'bg-emerald-50 hover:bg-emerald-100/80 text-emerald-800 border-emerald-300 font-extrabold shadow-2xs'
-                      : 'bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-200/60 font-bold hover:text-slate-900'
-                  }`}
-                >
-                  {isAllVisibleSelected || actionFeedback === 'select' ? (
-                    <Check className="w-3 h-3 text-emerald-600 stroke-[2.5] shrink-0" />
-                  ) : (
-                    <CheckSquare className="w-3 h-3 text-amber-600 shrink-0" />
-                  )}
-                  <span>{isAllVisibleSelected ? 'All Selected' : 'Select All'}</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={handleDeselectAll}
-                  title={isAllVisibleDeselected ? "All visible items are deselected" : "Deselect all visible items"}
-                  className={`min-w-[100px] justify-center px-2.5 py-1 rounded-lg text-[11px] flex items-center gap-1 border transition-all duration-200 active:scale-95 cursor-pointer ${
-                    actionFeedback === 'deselect'
-                      ? 'bg-slate-200 text-slate-900 border-slate-400 ring-2 ring-slate-300/60 scale-[0.98] font-black shadow-xs'
-                      : isAllVisibleDeselected
-                      ? 'bg-slate-50 text-slate-400 border-slate-200/70 font-medium'
-                      : 'bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-200/60 font-bold hover:text-slate-900'
-                  }`}
-                >
-                  <Square className={`w-3 h-3 shrink-0 ${isAllVisibleDeselected ? 'text-slate-300' : 'text-slate-500'}`} />
-                  <span>{isAllVisibleDeselected ? 'None Selected' : 'Deselect All'}</span>
-                </button>
-              </div>
-            </div>
+      {/* Global Filter Bar: Date & Student Category Selector */}
+      <div className="bg-white p-4 rounded-3xl border border-slate-200 shadow-sm space-y-3">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+          {/* Quick Date Buttons */}
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="font-extrabold text-slate-600 text-[11px] uppercase tracking-wider">Date:</span>
+            <button
+              type="button"
+              onClick={() => setSelectedDateStr(todayDateStr)}
+              className={`px-3 py-1.5 rounded-xl text-xs font-black transition-all cursor-pointer ${
+                isToday
+                  ? 'bg-amber-500 text-white shadow-xs'
+                  : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+              }`}
+            >
+              Today
+            </button>
+            <button
+              type="button"
+              onClick={() => setSelectedDateStr(tomorrowDateStr)}
+              className={`px-3 py-1.5 rounded-xl text-xs font-black transition-all cursor-pointer ${
+                isTomorrow
+                  ? 'bg-amber-500 text-white shadow-xs'
+                  : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+              }`}
+            >
+              Tomorrow
+            </button>
+            <input
+              type="date"
+              value={selectedDateStr}
+              min="2026-10-01"
+              max="2026-10-31"
+              onChange={(e) => setSelectedDateStr(e.target.value)}
+              className="text-xs font-bold text-slate-800 bg-slate-50 border border-slate-200 rounded-xl px-2.5 py-1.5 focus:outline-hidden focus:border-amber-500 cursor-pointer"
+            />
           </div>
 
-          {/* Search Field & Category Filter Pills */}
-          <div className="bg-white p-3 rounded-2xl border border-slate-200 shadow-2xs space-y-2.5">
+          {/* Student Category Selector Tabs */}
+          <div className="flex items-center gap-1.5 overflow-x-auto pb-1 sm:pb-0">
+            <span className="font-extrabold text-slate-600 text-[11px] uppercase tracking-wider">Category:</span>
+            {[
+              { id: 'ALL', label: 'All Categories' },
+              { id: 'Pre-primary', label: 'Pre-primary' },
+              { id: 'Primary', label: 'Primary' },
+              { id: 'Secondary', label: 'Secondary' },
+            ].map((cat) => (
+              <button
+                key={cat.id}
+                type="button"
+                onClick={() => setSelectedStudentCategory(cat.id)}
+                className={`px-3 py-1.5 rounded-xl text-xs font-black transition-all shrink-0 cursor-pointer ${
+                  selectedStudentCategory === cat.id
+                    ? 'bg-amber-500 text-white shadow-xs'
+                    : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                }`}
+              >
+                {cat.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* ========================================================================= */}
+      {/* SECTION A: OFFICIAL SCHOOL BRUNCH TIMETABLE (Authoritative & Prominent)   */}
+      {/* ========================================================================= */}
+      <section className="bg-gradient-to-br from-amber-500/10 via-orange-500/5 to-white p-5 sm:p-6 rounded-3xl border-2 border-amber-300/80 shadow-md space-y-4">
+        {/* Section A Header */}
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-amber-200/70">
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="px-2.5 py-0.5 rounded-full text-[10px] font-black bg-amber-500 text-white uppercase tracking-wider">
+                Official School Timetable
+              </span>
+              <span className="text-xs font-extrabold text-slate-600">
+                {formatDatePretty(selectedDateStr)}
+              </span>
+            </div>
+            <h2 className="text-lg sm:text-xl font-black text-slate-900 tracking-tight mt-1 flex items-center gap-2">
+              <CalendarDays className="w-5 h-5 text-amber-600" />
+              <span>Scheduled Brunch for {formatDatePretty(selectedDateStr)}</span>
+            </h2>
+            <p className="text-xs text-slate-600 mt-0.5">
+              Authoritative school menu from the October 2026 timetable. The system automatically serves these dishes to students without manual catalog selection.
+            </p>
+          </div>
+
+          <div className="self-start sm:self-auto shrink-0">
+            {isPastDate ? (
+              <span className="px-3 py-1 bg-slate-100 text-slate-600 border border-slate-300 rounded-xl text-xs font-black inline-flex items-center gap-1.5">
+                <Clock className="w-3.5 h-3.5" />
+                <span>Historical Timetable (Read-Only)</span>
+              </span>
+            ) : isToday ? (
+              <span className="px-3 py-1 bg-emerald-100 text-emerald-900 border border-emerald-300 rounded-xl text-xs font-black inline-flex items-center gap-1.5 animate-pulse">
+                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                <span>Today&apos;s Active Timetable</span>
+              </span>
+            ) : (
+              <span className="px-3 py-1 bg-blue-100 text-blue-900 border border-blue-300 rounded-xl text-xs font-black inline-flex items-center gap-1.5">
+                <CalendarDays className="w-3.5 h-3.5 text-blue-600" />
+                <span>Upcoming Scheduled Date</span>
+              </span>
+            )}
+          </div>
+        </div>
+
+        {/* Category Cards Grid */}
+        <div
+          className={`grid gap-4 ${
+            categoriesToDisplay.length > 1
+              ? 'grid-cols-1 md:grid-cols-3'
+              : 'grid-cols-1 max-w-2xl mx-auto'
+          }`}
+        >
+          {categoriesToDisplay.map((cat) => {
+            const officialMenu = officialDayEntry?.menus[cat];
+            const dbMenu = currentDayMenus.find((m) => {
+              const mCat = getStudentCategory(undefined, m.studentCategory);
+              return mCat === cat;
+            });
+
+            const isHoliday = Boolean(officialMenu?.isHoliday || dbMenu?.isHoliday);
+            const holidayReason =
+              officialMenu?.holidayReason || dbMenu?.holidayReason || 'School Holiday — No Brunch';
+            const dishName =
+              officialMenu?.dish && !officialMenu.isHoliday
+                ? officialMenu.dish
+                : dbMenu?.meal?.name && !dbMenu?.isHoliday
+                ? dbMenu.meal.name
+                : isHoliday
+                ? 'Holiday — No Brunch'
+                : 'Scheduled Brunch';
+
+            // Lookup meal details from catalog
+            const catalogMeal = OCTOBER_2026_MEAL_CATALOG.find(
+              (m) => m.name.toLowerCase().trim() === dishName.toLowerCase().trim()
+            ) || dbMenu?.meal;
+
+            // Card theme styles per category
+            const themeStyles = {
+              'Pre-primary': {
+                border: 'border-purple-300',
+                badgeBg: 'bg-purple-100 text-purple-900 border-purple-200',
+                cardBg: isHoliday ? 'bg-rose-50/70 border-rose-200' : 'bg-white',
+                label: 'Pre-primary (Nursery & KG)',
+              },
+              Primary: {
+                border: 'border-emerald-300',
+                badgeBg: 'bg-emerald-100 text-emerald-900 border-emerald-200',
+                cardBg: isHoliday ? 'bg-rose-50/70 border-rose-200' : 'bg-white',
+                label: 'Primary (Classes 1 - 5)',
+              },
+              Secondary: {
+                border: 'border-amber-300',
+                badgeBg: 'bg-amber-100 text-amber-900 border-amber-200',
+                cardBg: isHoliday ? 'bg-rose-50/70 border-rose-200' : 'bg-white',
+                label: 'Secondary (Classes 6 - 10)',
+              },
+            }[cat];
+
+            if (isHoliday) {
+              return (
+                <div
+                  key={cat}
+                  className={`p-5 rounded-3xl border-2 ${themeStyles.cardBg} ${themeStyles.border} shadow-2xs space-y-3 flex flex-col justify-between`}
+                >
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className={`px-2.5 py-0.5 rounded-lg text-[10px] font-black uppercase tracking-wider border ${themeStyles.badgeBg}`}>
+                        {themeStyles.label}
+                      </span>
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-rose-100 text-rose-800 border border-rose-200">
+                        Holiday
+                      </span>
+                    </div>
+
+                    <div className="pt-2 flex items-start gap-3">
+                      <div className="w-10 h-10 rounded-2xl bg-rose-100 text-rose-600 flex items-center justify-center shrink-0">
+                        <CalendarOff className="w-5 h-5" />
+                      </div>
+                      <div>
+                        <h3 className="text-base font-black text-slate-900 leading-snug">
+                          {holidayReason}
+                        </h3>
+                        <p className="text-xs text-slate-500 mt-1 leading-relaxed">
+                          School is closed for brunch on this date. No food preparation or parent ordering is required.
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="pt-3 border-t border-rose-200/70 text-[11px] font-bold text-rose-700 flex items-center gap-1.5">
+                    <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                    <span>Canteen Closed for Brunch</span>
+                  </div>
+                </div>
+              );
+            }
+
+            return (
+              <div
+                key={cat}
+                className={`p-5 rounded-3xl border-2 bg-white ${themeStyles.border} shadow-2xs space-y-3 flex flex-col justify-between`}
+              >
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className={`px-2.5 py-0.5 rounded-lg text-[10px] font-black uppercase tracking-wider border ${themeStyles.badgeBg}`}>
+                      {themeStyles.label}
+                    </span>
+                    <VegBadge isVegetarian={true} />
+                  </div>
+
+                  <div className="space-y-1">
+                    <h3 className="text-base sm:text-lg font-black text-slate-900 leading-tight">
+                      {dishName}
+                    </h3>
+                    <p className="text-xs text-slate-500 line-clamp-2 leading-relaxed">
+                      {catalogMeal?.description || 'Freshly prepared wholesome school brunch.'}
+                    </p>
+                  </div>
+
+                  {catalogMeal?.ingredients && (
+                    <div className="p-2.5 bg-slate-50 rounded-xl border border-slate-100 space-y-1">
+                      <div className="text-[10px] font-black text-slate-400 uppercase tracking-wider">
+                        Scheduled Ingredients:
+                      </div>
+                      <p className="text-[11px] text-slate-600 font-medium line-clamp-2">
+                        {catalogMeal.ingredients}
+                      </p>
+                    </div>
+                  )}
+
+                  {catalogMeal?.allergens && (
+                    <div className="text-[10px] font-bold text-amber-700 bg-amber-50 border border-amber-200 px-2.5 py-1 rounded-lg">
+                      Allergens: {catalogMeal.allergens}
+                    </div>
+                  )}
+                </div>
+
+                <div className="pt-3 border-t border-slate-100 flex items-center justify-between text-[11px] font-bold">
+                  {isPastDate ? (
+                    <span className="text-slate-400 flex items-center gap-1">
+                      <Clock className="w-3.5 h-3.5" />
+                      <span>Past Date (Closed)</span>
+                    </span>
+                  ) : (
+                    <span className="text-emerald-700 flex items-center gap-1.5">
+                      <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                      <span>Active for Student Ordering</span>
+                    </span>
+                  )}
+                  <span className="px-2 py-0.5 bg-slate-100 text-slate-700 rounded-md text-[10px] font-black">
+                    Official Timetable
+                  </span>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Clear Notice Explaining Automatic Timetable Workflow */}
+        <div className="p-3 bg-amber-100/60 border border-amber-200 rounded-2xl flex items-start gap-2.5 text-xs text-amber-950 font-medium">
+          <Info className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+          <p>
+            <strong>Note for Canteen Team:</strong> The scheduled dish shown above is automatically active on the parent dashboard for each student category. You do <em>not</em> need to select random dishes from the recipe catalog below to make the official timetable appear.
+          </p>
+        </div>
+      </section>
+
+      {/* ========================================================================= */}
+      {/* SECTION B: CANTEEN RECIPE CATALOG & CUSTOM MENU CONTROLS                  */}
+      {/* ========================================================================= */}
+      <section className="bg-white p-5 sm:p-6 rounded-3xl border border-slate-200 shadow-sm space-y-5">
+        {/* Section B Header */}
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] font-black uppercase tracking-wider bg-slate-100 text-slate-700 px-2 py-0.5 rounded-md">
+                Master Database
+              </span>
+              <span className="text-xs font-bold text-slate-500">
+                {allMeals.length} Total Recipes
+              </span>
+            </div>
+            <h2 className="text-base sm:text-lg font-black text-slate-900 tracking-tight mt-0.5 flex items-center gap-2">
+              <Layers className="w-5 h-5 text-amber-500" />
+              <span>Food Item Catalog & Recipe Controls</span>
+            </h2>
+            <p className="text-xs text-slate-500 mt-0.5">
+              Add new dishes, update recipes, or adjust catalog pricing. This catalog stores all canteen culinary records.
+            </p>
+          </div>
+
+          <div className="flex items-center gap-2 flex-wrap">
+            <button
+              type="button"
+              onClick={() => setIsAddModalOpen(true)}
+              className="px-3.5 py-2 bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 rounded-xl text-xs font-black transition-colors flex items-center gap-1.5 cursor-pointer shadow-2xs"
+            >
+              <Plus className="w-3.5 h-3.5 text-amber-600" />
+              <span>Add New Item</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={handleSaveTomorrowMenu}
+              disabled={savingTomorrow || !hasUnsavedChanges}
+              title={!hasUnsavedChanges ? 'No unsaved custom changes' : 'Save custom changes for this date'}
+              className="px-4 py-2 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-white rounded-xl text-xs font-black transition-all flex items-center gap-1.5 shadow-sm disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:from-amber-500 disabled:hover:to-orange-500 disabled:shadow-none"
+            >
+              {savingTomorrow ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <Save className="w-3.5 h-3.5" />
+              )}
+              <span>Save Catalog Changes</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Search Field & Category Filter Pills */}
+        <div className="space-y-3">
+          <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
             {/* Search Input */}
-            <div className="relative">
+            <div className="relative flex-1">
               <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
               <input
                 type="text"
                 value={tomorrowSearch}
                 onChange={(e) => setTomorrowSearch(e.target.value)}
-                placeholder="Search food item by name..."
-                className="w-full pl-9 pr-8 py-2 bg-slate-50 focus:bg-white border border-slate-200 focus:border-amber-500 rounded-xl text-xs sm:text-sm font-medium focus:outline-hidden focus:ring-2 focus:ring-amber-500/20 text-slate-900 transition-all placeholder:text-slate-400"
+                placeholder="Search recipe catalog by name..."
+                className="w-full pl-9 pr-8 py-2 bg-slate-50 focus:bg-white border border-slate-200 focus:border-amber-500 rounded-xl text-xs sm:text-sm font-semibold focus:outline-hidden focus:ring-2 focus:ring-amber-500/20 text-slate-900 transition-all placeholder:text-slate-400"
               />
               {tomorrowSearch && (
                 <button
@@ -665,168 +858,262 @@ function StaffKitchenContent() {
               )}
             </div>
 
-            {/* Category Filter Pills */}
-            <div className="flex items-center gap-1.5 overflow-x-auto pb-1 scrollbar-none">
+            {/* Quick Select All / Deselect All */}
+            <div className="flex items-center gap-2 self-end sm:self-auto shrink-0">
               <button
                 type="button"
-                onClick={() => setTomorrowCategoryFilter('ALL')}
-                className={`px-3 py-1 rounded-xl text-xs font-bold transition-all shrink-0 cursor-pointer ${
-                  tomorrowCategoryFilter === 'ALL'
-                    ? 'bg-amber-500 text-white shadow-2xs'
-                    : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                }`}
+                onClick={handleSelectAll}
+                className="px-2.5 py-1.5 rounded-lg text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-700 transition-colors flex items-center gap-1 cursor-pointer"
               >
-                All Items ({allMeals.length})
+                <CheckSquare className="w-3.5 h-3.5 text-amber-600" />
+                <span>Select All</span>
               </button>
-              {availableCategories.map((cat) => {
-                const count = allMeals.filter(
-                  (m) => getDisplayCategory(m.category) === cat
-                ).length;
-                return (
-                  <button
-                    key={cat}
-                    type="button"
-                    onClick={() => setTomorrowCategoryFilter(cat)}
-                    className={`px-3 py-1 rounded-xl text-xs font-bold transition-all shrink-0 cursor-pointer ${
-                      tomorrowCategoryFilter === cat
-                        ? 'bg-amber-500 text-white shadow-2xs'
-                        : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                    }`}
-                  >
-                    {cat.charAt(0) + cat.slice(1).toLowerCase()} ({count})
-                  </button>
-                );
-              })}
+              <button
+                type="button"
+                onClick={handleDeselectAll}
+                className="px-2.5 py-1.5 rounded-lg text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-700 transition-colors flex items-center gap-1 cursor-pointer"
+              >
+                <Square className="w-3.5 h-3.5 text-slate-500" />
+                <span>Deselect All</span>
+              </button>
             </div>
           </div>
 
-          {/* Meals Grouped by Category */}
-          {loadingTomorrow ? (
-            <div className="min-h-[35vh] flex items-center justify-center">
-              <div className="w-8 h-8 border-4 border-amber-500 border-t-transparent rounded-full animate-spin" />
-            </div>
-          ) : filteredMeals.length === 0 ? (
-            <div className="bg-white rounded-2xl border border-dashed border-slate-300 p-10 text-center space-y-2">
-              <UtensilsCrossed className="w-10 h-10 mx-auto text-slate-300" />
-              <h3 className="font-extrabold text-slate-800 text-base">No Food Items Found</h3>
-              <p className="text-xs text-slate-500">
-                {tomorrowSearch
-                  ? `No items match "${tomorrowSearch}". Try clearing search.`
-                  : 'Click "Add New Item" to create items in your canteen menu.'}
-              </p>
-            </div>
-          ) : (
-            <div className="space-y-5">
-              {Object.entries(groupedMeals).map(([catName, mealsInGroup]) => (
-                <div key={catName} className="space-y-2.5">
-                  <div className="flex items-center justify-between px-1">
-                    <h4 className="text-xs font-extrabold uppercase tracking-wider text-slate-600 flex items-center gap-1.5">
-                      <span className="w-2 h-2 rounded-full bg-amber-500" />
-                      <span>{catName}</span>
-                      <span className="text-slate-400 font-semibold">
-                        ({mealsInGroup.length})
-                      </span>
-                    </h4>
-                  </div>
+          {/* Category Filter Pills */}
+          <div className="flex items-center gap-1.5 overflow-x-auto pb-1 scrollbar-none">
+            <button
+              type="button"
+              onClick={() => setTomorrowCategoryFilter('ALL')}
+              className={`px-3 py-1 rounded-xl text-xs font-bold transition-all shrink-0 cursor-pointer ${
+                tomorrowCategoryFilter === 'ALL'
+                  ? 'bg-amber-500 text-white shadow-2xs'
+                  : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+              }`}
+            >
+              All Items ({allMeals.length})
+            </button>
+            {availableCategories.map((cat) => {
+              const count = allMeals.filter(
+                (m) => getDisplayCategory(m.category) === cat
+              ).length;
+              return (
+                <button
+                  key={cat}
+                  type="button"
+                  onClick={() => setTomorrowCategoryFilter(cat)}
+                  className={`px-3 py-1 rounded-xl text-xs font-bold transition-all shrink-0 cursor-pointer ${
+                    tomorrowCategoryFilter === cat
+                      ? 'bg-amber-500 text-white shadow-2xs'
+                      : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                  }`}
+                >
+                  {cat.charAt(0) + cat.slice(1).toLowerCase()} ({count})
+                </button>
+              );
+            })}
+          </div>
+        </div>
 
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                    {mealsInGroup.map((meal) => {
-                      const isSelected = selectedMealIds.includes(meal.id);
+        {/* Meals Grouped by Category */}
+        {loadingTomorrow ? (
+          <div className="min-h-[25vh] flex items-center justify-center">
+            <div className="w-8 h-8 border-4 border-amber-500 border-t-transparent rounded-full animate-spin" />
+          </div>
+        ) : filteredMeals.length === 0 ? (
+          <div className="bg-slate-50 rounded-2xl border border-dashed border-slate-300 p-8 text-center space-y-2">
+            <UtensilsCrossed className="w-10 h-10 mx-auto text-slate-300" />
+            <h3 className="font-extrabold text-slate-800 text-sm">No Food Items Found</h3>
+            <p className="text-xs text-slate-500">
+              {tomorrowSearch
+                ? `No items match "${tomorrowSearch}". Try clearing search.`
+                : 'Click "Add New Item" to create items in your canteen menu.'}
+            </p>
+          </div>
+        ) : (
+          <div className="space-y-4">
+            {Object.entries(groupedMeals).map(([catName, mealsInGroup]) => (
+              <div key={catName} className="space-y-2.5">
+                <div className="flex items-center justify-between px-1">
+                  <h4 className="text-xs font-extrabold uppercase tracking-wider text-slate-600 flex items-center gap-1.5">
+                    <span className="w-2 h-2 rounded-full bg-amber-500" />
+                    <span>{catName}</span>
+                    <span className="text-slate-400 font-semibold">
+                      ({mealsInGroup.length})
+                    </span>
+                  </h4>
+                </div>
 
-                      return (
-                        <div
-                          key={meal.id}
-                          onClick={() => handleToggleMeal(meal.id)}
-                          className={`p-3 rounded-2xl border transition-all cursor-pointer flex items-center justify-between gap-3 select-none ${
-                            isSelected
-                              ? 'bg-amber-50/60 border-amber-400 shadow-2xs ring-1 ring-amber-300/60'
-                              : 'bg-white border-slate-200/90 hover:border-slate-300 hover:bg-slate-50/60 shadow-2xs'
-                          }`}
-                        >
-                          {/* Left: Checkbox + Icon + Info */}
-                          <div className="flex items-center gap-3 min-w-0 flex-1">
-                            {/* Big Touch-Friendly Toggle Checkbox */}
-                            <div className="shrink-0">
-                              <div
-                                className={`w-6 h-6 rounded-lg flex items-center justify-center transition-all ${
-                                  isSelected
-                                    ? 'bg-amber-500 text-white shadow-xs'
-                                    : 'border-2 border-slate-300 bg-white'
-                                }`}
-                              >
-                                {isSelected && <CheckSquare className="w-4 h-4 stroke-[3]" />}
-                              </div>
-                            </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  {mealsInGroup.map((meal) => {
+                    const isSelected = selectedMealIds.includes(meal.id);
 
-                            <div className="w-10 h-10 rounded-xl bg-slate-100 flex items-center justify-center shrink-0">
-                              <MealIcon name={meal.name} category={getDisplayCategory(meal.category)} size="sm" />
-                            </div>
-
-                            <div className="min-w-0 flex-1">
-                              <div className="flex items-center gap-1.5">
-                                <VegBadge isVegetarian={meal.isVegetarian} size="sm" />
-                                <h5 className="font-extrabold text-xs sm:text-sm text-slate-900 truncate">
-                                  {meal.name}
-                                </h5>
-                              </div>
-                              <div className="flex items-center gap-2 mt-0.5">
-                                <span className="text-xs font-black text-amber-700">
-                                  {formatINR(meal.price || 0)}
-                                </span>
-                                <MealCategoryBadge category={getDisplayCategory(meal.category)} size="sm" />
-                              </div>
+                    return (
+                      <div
+                        key={meal.id}
+                        onClick={() => handleToggleMeal(meal.id)}
+                        className={`p-3 rounded-2xl border transition-all cursor-pointer flex items-center justify-between gap-3 select-none ${
+                          isSelected
+                            ? 'bg-amber-50/70 border-amber-400 shadow-2xs ring-1 ring-amber-300/60'
+                            : 'bg-white border-slate-200 hover:border-slate-300 hover:bg-slate-50/60 shadow-2xs'
+                        }`}
+                      >
+                        {/* Left: Checkbox + Icon + Info */}
+                        <div className="flex items-center gap-3 min-w-0 flex-1">
+                          <div className="shrink-0">
+                            <div
+                              className={`w-6 h-6 rounded-lg flex items-center justify-center border transition-all ${
+                                isSelected
+                                  ? 'bg-amber-500 border-amber-600 text-white shadow-2xs'
+                                  : 'bg-white border-slate-300 text-transparent'
+                              }`}
+                            >
+                              <Check className="w-4 h-4 stroke-[3]" />
                             </div>
                           </div>
 
-                          {/* Right: Edit Button */}
-                          <div className="shrink-0 pl-1">
-                            <button
-                              type="button"
-                              onClick={(e) => handleOpenEdit(meal, e)}
-                              className="p-2 rounded-xl text-slate-400 hover:text-amber-800 hover:bg-amber-100 border border-transparent hover:border-amber-200 transition-colors cursor-pointer"
-                              title={`Edit ${meal.name}`}
-                            >
-                              <Edit2 className="w-3.5 h-3.5" />
-                            </button>
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-1.5">
+                              <h5 className="font-extrabold text-xs sm:text-sm text-slate-900 truncate">
+                                {meal.name}
+                              </h5>
+                              <VegBadge isVegetarian={meal.isVegetarian} />
+                            </div>
+                            <div className="flex items-center gap-2 mt-0.5 text-[11px] text-slate-500">
+                              <span className="font-bold text-slate-700">₹{formatINR(meal.price)}</span>
+                              <span>•</span>
+                              <span className="capitalize">{meal.category?.toLowerCase() || 'Lunch'}</span>
+                            </div>
                           </div>
                         </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
 
-          {/* Sticky Mobile Floating Save Bar */}
-          <div className="fixed bottom-[58px] md:bottom-0 left-0 right-0 z-30 p-2.5 sm:p-3 bg-white/95 backdrop-blur-md border-t border-amber-200 shadow-lg">
-            <div className="max-w-3xl mx-auto flex items-center justify-between gap-3">
+                        {/* Right: Edit Button */}
+                        <button
+                          type="button"
+                          onClick={(e) => handleOpenEdit(meal, e)}
+                          className="p-2 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-xl transition-colors shrink-0"
+                          title="Edit recipe details"
+                        >
+                          <Edit2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
+      {/* ========================================================================= */}
+      {/* MODAL: Full Month October 2026 Timetable                                  */}
+      {/* ========================================================================= */}
+      {isTimetableModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-950/60 backdrop-blur-xs animate-in fade-in duration-150">
+          <div className="bg-white rounded-3xl shadow-2xl max-w-4xl w-full max-h-[90vh] flex flex-col border border-slate-100">
+            {/* Modal Header */}
+            <div className="p-4 sm:p-6 border-b border-slate-100 flex items-center justify-between">
               <div>
-                <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block leading-tight">
-                  Tomorrow&apos;s Menu
+                <span className="px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-amber-100 text-amber-800">
+                  Authoritative Timetable
                 </span>
-                <p className="text-xs sm:text-sm font-black text-slate-900 leading-tight">
-                  {selectedMealIds.length} items active
+                <h2 className="text-lg sm:text-xl font-extrabold text-slate-900 mt-1">
+                  Complete October 2026 School Brunch Schedule
+                </h2>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Full 31-day school brunch timetable for Pre-primary, Primary, and Secondary.
                 </p>
               </div>
 
               <button
                 type="button"
-                onClick={handleSaveTomorrowMenu}
-                disabled={savingTomorrow || !hasUnsavedChanges}
-                title={!hasUnsavedChanges ? "No changes to save" : "Save tomorrow's menu"}
-                className="px-5 py-2.5 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 active:scale-[0.98] text-white font-black text-xs sm:text-sm rounded-xl shadow-md transition-all flex items-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:from-amber-500 disabled:hover:to-orange-500 disabled:shadow-none"
+                onClick={() => setIsTimetableModalOpen(false)}
+                className="p-2 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-full transition-colors cursor-pointer"
               >
-                {savingTomorrow ? (
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                ) : (
-                  <Save className="w-4 h-4" />
-                )}
-                <span>Save Tomorrow&apos;s Menu</span>
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Modal Content Table */}
+            <div className="p-4 sm:p-6 overflow-y-auto space-y-3 flex-1">
+              <div className="divide-y divide-slate-100 border border-slate-150 rounded-2xl overflow-hidden">
+                {OCTOBER_2026_TIMETABLE.map((day) => {
+                  const isDayPast = day.date < todayDateStr;
+                  const isDayToday = day.date === todayDateStr;
+                  const isSelected = day.date === selectedDateStr;
+
+                  return (
+                    <div
+                      key={day.date}
+                      onClick={() => {
+                        setSelectedDateStr(day.date);
+                        setIsTimetableModalOpen(false);
+                      }}
+                      className={`p-3.5 transition-colors cursor-pointer flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 ${
+                        isSelected
+                          ? 'bg-amber-50/80 border-l-4 border-l-amber-500'
+                          : isDayToday
+                          ? 'bg-blue-50/60 border-l-4 border-l-blue-500'
+                          : isDayPast
+                          ? 'bg-slate-50/50 hover:bg-slate-100/60'
+                          : 'bg-white hover:bg-slate-50'
+                      }`}
+                    >
+                      <div className="w-36 shrink-0">
+                        <div className="text-xs font-black text-slate-900 flex items-center gap-1.5">
+                          <span>{day.displayDate}</span>
+                          <span className="text-[10px] text-slate-400">({day.day.slice(0, 3)})</span>
+                        </div>
+                        <div className="text-[10px] text-slate-500 font-semibold mt-0.5">
+                          {isDayToday ? 'Today' : isDayPast ? 'Historical' : 'Upcoming'}
+                        </div>
+                      </div>
+
+                      <div className="flex-1 grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs">
+                        {/* Pre-primary */}
+                        <div className="p-2 rounded-xl bg-purple-50/50 border border-purple-100/80">
+                          <span className="text-[10px] font-black uppercase text-purple-700 block">Pre-primary:</span>
+                          <span className={`text-[11px] font-bold ${day.menus['Pre-primary'].isHoliday ? 'text-rose-600' : 'text-slate-800'}`}>
+                            {day.menus['Pre-primary'].dish}
+                          </span>
+                        </div>
+
+                        {/* Primary */}
+                        <div className="p-2 rounded-xl bg-emerald-50/50 border border-emerald-100/80">
+                          <span className="text-[10px] font-black uppercase text-emerald-700 block">Primary:</span>
+                          <span className={`text-[11px] font-bold ${day.menus.Primary.isHoliday ? 'text-rose-600' : 'text-slate-800'}`}>
+                            {day.menus.Primary.dish}
+                          </span>
+                        </div>
+
+                        {/* Secondary */}
+                        <div className="p-2 rounded-xl bg-amber-50/50 border border-amber-100/80">
+                          <span className="text-[10px] font-black uppercase text-amber-700 block">Secondary:</span>
+                          <span className={`text-[11px] font-bold ${day.menus.Secondary.isHoliday ? 'text-rose-600' : 'text-slate-800'}`}>
+                            {day.menus.Secondary.dish}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Modal Footer */}
+            <div className="p-4 border-t border-slate-100 flex items-center justify-between text-xs text-slate-500">
+              <span>Click any date row to inspect its full details.</span>
+              <button
+                type="button"
+                onClick={() => setIsTimetableModalOpen(false)}
+                className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold rounded-xl cursor-pointer"
+              >
+                Close
               </button>
             </div>
           </div>
         </div>
+      )}
 
       {/* ========================================================================= */}
       {/* MODAL: Add New Food Item                                                  */}
@@ -912,10 +1199,10 @@ function StaffKitchenContent() {
               <div className="flex items-center justify-between p-3 bg-amber-50/70 rounded-xl border border-amber-200">
                 <div>
                   <span className="text-xs font-extrabold text-amber-900 block">
-                    Available for Tomorrow
+                    Available in Kitchen Catalog
                   </span>
                   <span className="text-[10px] text-amber-700 font-medium">
-                    Automatically select for tomorrow&apos;s menu
+                    Include in active kitchen items
                   </span>
                 </div>
                 <input
@@ -1008,7 +1295,7 @@ function StaffKitchenContent() {
                   </label>
                   <select
                     value={editMealCategory}
-                    onChange={(e) => setEditMealCategory(e.target.value)}
+                    onChange={(e) => setNewMealCategory(e.target.value)}
                     className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs sm:text-sm font-semibold text-slate-900 focus:outline-hidden focus:border-amber-500"
                   >
                     <option value="LUNCH">Lunch</option>
