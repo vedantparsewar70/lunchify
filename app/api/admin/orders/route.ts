@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import prisma from '@/lib/prisma';
 import { getCurrentUser } from '@/lib/auth';
 import { db } from '@/lib/firebase-admin';
-import { FieldValue } from 'firebase-admin/firestore';
+import { cancelOrderWithRefund, OrderCancellationError } from '@/lib/order-cancellation';
 
 export async function GET(req: Request) {
   try {
@@ -202,6 +202,35 @@ export async function PATCH(req: Request) {
       return NextResponse.json({ error: 'Invalid order status' }, { status: 400 });
     }
 
+    // Cancellation by Admin / Staff: restores stock once and refunds through Cashfree.
+    // Repeating it on a cancelled order with a pending/failed refund retries the same refund.
+    if (orderStatus === 'CANCELLED') {
+      const result = await cancelOrderWithRefund({
+        orderId,
+        cancelledBy: user.id,
+        blockedStatuses: ['COLLECTED'],
+      });
+      if (result.alreadyCancelled && result.refundAmount === 0) {
+        return NextResponse.json(
+          { error: 'This order has already been cancelled and cannot be modified.' },
+          { status: 400 }
+        );
+      }
+
+      try {
+        const { notifyOrdersUpdated } = await import('@/lib/sync-events');
+        await notifyOrdersUpdated();
+      } catch {
+        // non-blocking
+      }
+
+      return NextResponse.json({
+        success: true,
+        order: { id: orderId, orderStatus: 'CANCELLED', paymentStatus: result.paymentStatus },
+        message: result.message,
+      });
+    }
+
     // Atomic transaction for order state changes: prevents race conditions & double collection
     const updated = await db.runTransaction(async (transaction) => {
       const orderRef = db.collection('orders').doc(orderId);
@@ -234,28 +263,7 @@ export async function PATCH(req: Request) {
 
       const now = new Date().toISOString();
 
-      // 2. Cancellation by Admin / Staff: Restore menu stock
-      if (orderStatus === 'CANCELLED') {
-        const itemsSnap = await db.collection('orderItems').where('orderId', '==', orderId).get();
-        for (const doc of itemsSnap.docs) {
-          const item = doc.data();
-          const menuRef = db.collection('menus').doc(`${item.mealId}_${item.date}`);
-          transaction.update(menuRef, {
-            availableQuantity: FieldValue.increment(Number(item.quantity)),
-            updatedAt: now,
-          });
-        }
-
-        transaction.update(orderRef, {
-          orderStatus: 'CANCELLED',
-          paymentStatus: 'REFUNDED',
-          updatedAt: now,
-        });
-
-        return { ...orderData, orderStatus: 'CANCELLED', paymentStatus: 'REFUNDED', updatedAt: now };
-      }
-
-      // 3. Status progression
+      // 2. Status progression
       const updateData: any = {
         orderStatus,
         updatedAt: now,
@@ -278,6 +286,9 @@ export async function PATCH(req: Request) {
 
     return NextResponse.json({ success: true, order: updated });
   } catch (error: any) {
+    if (error instanceof OrderCancellationError) {
+      return NextResponse.json({ error: error.message }, { status: error.status });
+    }
     console.error('Error updating order status:', error);
     const msg = error?.message || 'Failed to update order status';
     return NextResponse.json({ error: msg }, { status: 400 });

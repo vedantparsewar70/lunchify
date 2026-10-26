@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getCurrentUser } from '@/lib/auth';
 import { db } from '@/lib/firebase-admin';
-import { getCashfreeOrder, getCashfreeOrderPayments } from '@/lib/cashfree';
+import { getVerifiedCashfreePayment, paymentDetailsFromCashfree } from '@/lib/cashfree';
 import { fulfillParentOrder } from '@/lib/order-fulfillment';
 
 export const runtime = 'nodejs';
@@ -15,108 +15,84 @@ export async function POST(req: Request) {
     }
 
     const { orderId } = await req.json().catch(() => ({}));
-    if (!orderId) {
+    if (!orderId || typeof orderId !== 'string') {
       return NextResponse.json({ error: 'orderId is required' }, { status: 400 });
     }
 
-    // 1. Check if order is ALREADY finalized and confirmed as PAID
-    const orderRef = db.collection('orders').doc(orderId);
-    const orderSnap = await orderRef.get();
+    const orderSnap = await db.collection('orders').doc(orderId).get();
+    const pendingSnap = await db.collection('pending_orders').doc(orderId).get();
+    const record = orderSnap.exists ? orderSnap.data() || {} : pendingSnap.exists ? pendingSnap.data() || {} : null;
 
-    if (orderSnap.exists) {
-      const orderData = orderSnap.data() || {};
-      if (user.role === 'PARENT' && orderData.parentId !== user.parentId) {
-        return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
-      }
-
-      if (orderData.paymentStatus === 'PAID') {
-        return NextResponse.json({
-          success: true,
-          verified: true,
-          orderId,
-          paymentStatus: 'PAID',
-          orderStatus: orderData.orderStatus || 'CONFIRMED',
-        });
-      }
-    }
-
-    // 2. Check pending checkout session
-    const pendingRef = db.collection('pending_orders').doc(orderId);
-    const pendingSnap = await pendingRef.get();
-
-    if (!orderSnap.exists && !pendingSnap.exists) {
+    // Parents may only verify their own checkouts; missing and not-owned look the same.
+    if (!record || (user.role === 'PARENT' && record.parentId !== user.parentId)) {
       return NextResponse.json({ error: 'Checkout session or order not found' }, { status: 404 });
     }
 
-    const pendingData = pendingSnap.exists ? pendingSnap.data() || {} : {};
-    if (user.role === 'PARENT' && pendingData.parentId && pendingData.parentId !== user.parentId) {
-      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+    // 1. Existing orders: report their actual state, never re-fulfil (e.g. a cancelled order)
+    if (orderSnap.exists && record.paymentStatus !== 'PENDING') {
+      return NextResponse.json({
+        success: record.paymentStatus === 'PAID',
+        verified: record.paymentStatus === 'PAID',
+        orderId,
+        paymentStatus: record.paymentStatus,
+        orderStatus: record.orderStatus || 'CONFIRMED',
+      });
     }
 
-    // 3. Query Cashfree API to verify authoritative payment status
-    let cfOrder: any = null;
-    let cfPayments: any[] = [];
+    // 2. Query Cashfree API to verify authoritative payment status
+    let verified;
     try {
-      cfOrder = await getCashfreeOrder(orderId);
-      cfPayments = await getCashfreeOrderPayments(orderId);
+      verified = await getVerifiedCashfreePayment(orderId);
     } catch (cfErr: any) {
       console.warn('[Cashfree Verify] Could not retrieve Cashfree order status:', cfErr.message);
+      return NextResponse.json(
+        { error: 'Could not confirm payment status right now. Please refresh in a moment.' },
+        { status: 503 }
+      );
     }
 
-    const isPaidOnCashfree =
-      cfOrder?.order_status === 'PAID' ||
-      cfPayments.some((p: any) => p.payment_status === 'SUCCESS');
+    // 3. ONLY create order if payment is successfully completed.
+    // fulfillParentOrder checks the paid amount and currency against the pending order total.
+    if (verified.paid) {
+      const details = paymentDetailsFromCashfree(verified);
+      const result = await fulfillParentOrder(orderId, details);
 
-    // 4. ONLY create order if payment is successfully completed
-    if (isPaidOnCashfree) {
-      const successPay = cfPayments.find((p: any) => p.payment_status === 'SUCCESS') || {};
-      const txnRef =
-        successPay.cf_payment_id ||
-        successPay.bank_reference ||
-        `CF-${Date.now().toString().slice(-8)}`;
-
-      let methodStr = 'UPI';
-      const rawMethod = typeof successPay.payment_method === 'object' ? Object.keys(successPay.payment_method)[0]?.toUpperCase() : '';
-      if (rawMethod.includes('CARD')) methodStr = 'CARD';
-      else if (rawMethod.includes('NET') || rawMethod.includes('NB')) methodStr = 'NET_BANKING';
-      else if (rawMethod.includes('UPI')) methodStr = 'UPI';
-
-      const upiId = successPay.payment_method?.upi?.upi_id || null;
-      const cardLastFour = successPay.payment_method?.card?.card_number ? successPay.payment_method.card.card_number.slice(-4) : null;
-      const bankName = successPay.payment_method?.netbanking?.netbanking_bank_name || null;
-
-      const fulfillResult = await fulfillParentOrder(orderId, {
-        transactionRef: String(txnRef),
-        paymentMethod: methodStr,
-        upiId,
-        cardLastFour,
-        bankName,
-        cashfreeOrderId: cfOrder?.cf_order_id || null,
-        amount: Number(successPay.payment_amount || pendingData.totalAmount || 0),
-      });
+      if (!result.success) {
+        console.error(`[Payment Review] Order ${orderId}: ${result.reason} - ${result.message}`);
+        return NextResponse.json(
+          {
+            error:
+              result.reason === 'STOCK_UNAVAILABLE'
+                ? 'Payment received, but a meal in your order sold out before it could be confirmed. The canteen will review your order and arrange a refund.'
+                : 'Payment received but the order could not be confirmed automatically. The canteen will review it.',
+            reason: result.reason,
+          },
+          { status: 409 }
+        );
+      }
 
       return NextResponse.json({
         success: true,
         verified: true,
-        orderId: fulfillResult.orderId,
+        orderId: result.orderId,
         paymentStatus: 'PAID',
         orderStatus: 'CONFIRMED',
-        transactionRef: String(txnRef),
+        transactionRef: details.transactionRef,
       });
     }
 
-    // 5. Payment is incomplete, dropped, or failed: Strictly DO NOT create any order!
+    // 4. Payment is incomplete, dropped, or failed: Strictly DO NOT create any order!
     return NextResponse.json({
       success: false,
       verified: false,
       orderId,
       paymentStatus: 'FAILED',
       orderStatus: 'NONE',
-      cashfreeStatus: cfOrder?.order_status || 'NOT_COMPLETED',
+      cashfreeStatus: verified.orderStatus,
       message: 'Payment was not completed. Strictly no order was created.',
     });
   } catch (error: any) {
     console.error('Error verifying order payment:', error);
-    return NextResponse.json({ error: error.message || 'Verification failed' }, { status: 500 });
+    return NextResponse.json({ error: 'Verification failed' }, { status: 500 });
   }
 }

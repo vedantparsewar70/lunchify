@@ -1,6 +1,8 @@
+import crypto from 'crypto';
+import type { Firestore } from 'firebase-admin/firestore';
 import { db } from './firebase-admin';
-import { FieldValue } from 'firebase-admin/firestore';
 import { cleanDoc, generateId } from './firestore-db';
+import { collectMenuStockInTransaction } from './menu-stock';
 
 export interface PendingParentOrder {
   id: string;
@@ -20,6 +22,7 @@ export interface PendingParentOrder {
 export interface PendingTeacherOrder {
   id: string;
   orderType: 'TEACHER';
+  userId?: string | null;
   teacherName: string;
   teacherPhone?: string | null;
   totalAmount: number;
@@ -31,6 +34,58 @@ export interface PendingTeacherOrder {
   items: any[];
   createdAt: string;
   updatedAt: string;
+}
+
+/**
+ * Payment details confirmed by the payment gateway (not by the client).
+ * amount and currency are checked against the pending order total before fulfilment.
+ */
+export interface VerifiedPaymentDetails {
+  amount: number;
+  currency?: string;
+  transactionRef?: string;
+  paymentMethod?: string;
+  upiId?: string | null;
+  cardLastFour?: string | null;
+  bankName?: string | null;
+  cashfreeOrderId?: string | null;
+}
+
+export interface FulfillmentResult {
+  success: boolean;
+  orderId: string;
+  alreadyFulfilled?: boolean;
+  reason?: 'AMOUNT_MISMATCH' | 'STOCK_UNAVAILABLE' | 'ORDER_NOT_PAYABLE';
+  message?: string;
+}
+
+/**
+ * Server-generated parent order ID. A client idempotency key only makes the ID deterministic
+ * for retries of the same checkout; it is hashed with the parent ID, so it can never select
+ * or overwrite another parent's order.
+ */
+export function generateParentOrderId(parentId: string, idempotencyKey?: string | null): string {
+  if (idempotencyKey) {
+    const digest = crypto.createHash('sha256').update(`${parentId}:${idempotencyKey}`).digest('hex');
+    return `ORD-${digest.slice(0, 24).toUpperCase()}`;
+  }
+  return `ORD-${crypto.randomBytes(12).toString('hex').toUpperCase()}`;
+}
+
+/**
+ * Returns a description of the problem when the paid amount/currency does not match the expected total.
+ */
+export function checkPaidAmount(payment: VerifiedPaymentDetails, expectedTotal: number): string | null {
+  const currency = String(payment.currency || 'INR').toUpperCase();
+  if (currency !== 'INR') {
+    return `Unexpected payment currency ${currency}`;
+  }
+  const paid = Number(payment.amount);
+  const expected = Number(expectedTotal);
+  if (!Number.isFinite(paid) || !Number.isFinite(expected) || expected <= 0 || Math.abs(paid - expected) >= 0.01) {
+    return `Paid amount ${paid} does not match expected amount ${expected}`;
+  }
+  return null;
 }
 
 /**
@@ -59,81 +114,113 @@ export async function savePendingTeacherOrder(data: PendingTeacherOrder): Promis
 
 /**
  * Fulfill and create parent order ONLY when payment is successfully confirmed.
- * Concurrently safe, atomic transaction that validates portions, creates order records,
- * and removes pending checkout intent.
+ * Single atomic transaction: all reads (order, pending checkout, menu stock) happen before
+ * any write, stock is checked per menu across the whole cart, and repeated calls for the
+ * same order (duplicate webhooks, verify + webhook) are no-ops once the order exists.
  */
 export async function fulfillParentOrder(
   orderId: string,
-  paymentDetails?: {
-    transactionRef?: string;
-    paymentMethod?: string;
-    upiId?: string | null;
-    cardLastFour?: string | null;
-    bankName?: string | null;
-    cashfreeOrderId?: string | null;
-    amount?: number;
-  }
-): Promise<{ success: boolean; orderId: string; alreadyFulfilled?: boolean }> {
+  payment: VerifiedPaymentDetails,
+  firestore: Firestore = db
+): Promise<FulfillmentResult> {
   const now = new Date().toISOString();
-  const orderRef = db.collection('orders').doc(orderId);
-  const pendingRef = db.collection('pending_orders').doc(orderId);
+  const orderRef = firestore.collection('orders').doc(orderId);
+  const pendingRef = firestore.collection('pending_orders').doc(orderId);
 
-  const result = await db.runTransaction(async (transaction) => {
-    // 1. Check if order is already created
+  const result = await firestore.runTransaction(async (transaction): Promise<FulfillmentResult> => {
+    // --- Reads ---
     const existingOrderSnap = await transaction.get(orderRef);
+    const pendingSnap = await transaction.get(pendingRef);
+
     if (existingOrderSnap.exists) {
       const existingData = existingOrderSnap.data() || {};
       if (existingData.paymentStatus === 'PAID') {
         return { success: true, orderId, alreadyFulfilled: true };
       }
-      // If was previously created as PENDING (legacy), upgrade to PAID
+      if (existingData.paymentStatus !== 'PENDING') {
+        // Cancelled, refunded or failed orders must never be flipped back to PAID by a late delivery.
+        return { success: false, orderId, reason: 'ORDER_NOT_PAYABLE', message: `Order is ${existingData.paymentStatus}` };
+      }
+      // Legacy order created as PENDING before payment: upgrade only if the amount matches.
+      const mismatch = checkPaidAmount(payment, existingData.totalAmount);
+      if (mismatch) {
+        return { success: false, orderId, reason: 'AMOUNT_MISMATCH', message: mismatch };
+      }
       transaction.update(orderRef, {
         paymentStatus: 'PAID',
         orderStatus: 'CONFIRMED',
-        cashfreeOrderId: paymentDetails?.cashfreeOrderId || existingData.cashfreeOrderId || null,
+        cashfreeOrderId: payment.cashfreeOrderId || existingData.cashfreeOrderId || null,
         updatedAt: now,
       });
       return { success: true, orderId };
     }
 
-    // 2. Fetch pending checkout document
-    const pendingSnap = await transaction.get(pendingRef);
     if (!pendingSnap.exists) {
       throw new Error(`Pending checkout session ${orderId} not found`);
     }
 
     const pending = pendingSnap.data() as PendingParentOrder;
-    const evaluatedCartItems = pending.cartItems || [];
+    const cartItems = pending.cartItems || [];
 
-    // 3. Check and decrement portions atomically
-    for (const item of evaluatedCartItems) {
-      const catSlug = String((item as any).studentCategory || 'all').toLowerCase().replace(/\s+/g, '_');
-      const categoryMenuDocId = `menu_${item.date}_${catSlug}`;
-      let menuRef = db.collection('menus').doc(categoryMenuDocId);
-      let menuSnap = await transaction.get(menuRef);
-
-      if (!menuSnap.exists) {
-        const legacyDocId = `${item.mealId}_${item.date}`;
-        menuRef = db.collection('menus').doc(legacyDocId);
-        menuSnap = await transaction.get(menuRef);
-      }
-
-      if (menuSnap.exists) {
-        transaction.update(menuRef, {
-          availableQuantity: FieldValue.increment(-Number(item.quantity || 1)),
-          updatedAt: now,
-        });
-      }
+    const mismatch = checkPaidAmount(payment, pending.totalAmount);
+    if (mismatch) {
+      // Returns immediately after this write, so no read follows it.
+      transaction.update(pendingRef, {
+        status: 'NEEDS_REVIEW',
+        reviewReason: 'AMOUNT_MISMATCH',
+        paidAmount: Number(payment.amount) || 0,
+        updatedAt: now,
+      });
+      return { success: false, orderId, reason: 'AMOUNT_MISMATCH', message: mismatch };
     }
 
-    // 4. Create official Order record
+    const menuStock = await collectMenuStockInTransaction(
+      transaction,
+      firestore,
+      cartItems.map((item: any) => ({
+        mealId: item.mealId,
+        date: item.date,
+        quantity: Number(item.quantity || 1),
+        studentCategory: item.studentCategory || null,
+        menuId: item.menuId || null,
+      }))
+    );
+
+    // --- Writes ---
+    const insufficient =
+      menuStock.unresolved.length > 0 || menuStock.stock.some((s) => s.available < s.required);
+    if (insufficient) {
+      // Payment was captured but the meals can no longer be supplied. Never oversell or go negative;
+      // keep the checkout for canteen review and refund.
+      transaction.update(pendingRef, {
+        status: 'NEEDS_REVIEW',
+        reviewReason: 'STOCK_UNAVAILABLE',
+        paidAmount: Number(payment.amount) || 0,
+        cashfreeOrderId: payment.cashfreeOrderId || pending.cashfreeOrderId || null,
+        updatedAt: now,
+      });
+      return {
+        success: false,
+        orderId,
+        reason: 'STOCK_UNAVAILABLE',
+        message: 'Payment received, but one or more meals are no longer available. The order needs canteen review for a refund.',
+      };
+    }
+
+    for (const s of menuStock.stock) {
+      transaction.update(s.ref, {
+        availableQuantity: s.available - s.required,
+        updatedAt: now,
+      });
+    }
+
     const orderObj = cleanDoc({
       id: orderId,
       parentId: pending.parentId,
       totalAmount: pending.totalAmount,
       paymentStatus: 'PAID',
       orderStatus: 'CONFIRMED',
-      cashfreeOrderId: paymentDetails?.cashfreeOrderId || pending.cashfreeOrderId || null,
+      cashfreeOrderId: payment.cashfreeOrderId || pending.cashfreeOrderId || null,
       paymentSessionId: pending.paymentSessionId || null,
       notes: pending.notes || null,
       createdAt: now,
@@ -141,15 +228,15 @@ export async function fulfillParentOrder(
     });
     transaction.set(orderRef, orderObj);
 
-    // 5. Create OrderItems
-    for (const item of evaluatedCartItems) {
+    cartItems.forEach((item: any, index: number) => {
       const itemId = generateId('oit_');
       const itemObj = cleanDoc({
         id: itemId,
         orderId,
         studentId: item.studentId,
-        studentCategory: (item as any).studentCategory || null,
+        studentCategory: item.studentCategory || null,
         mealId: item.mealId,
+        menuId: menuStock.lineMenuIds[index],
         date: item.date,
         quantity: item.quantity,
         unitPrice: item.mealPrice,
@@ -158,40 +245,36 @@ export async function fulfillParentOrder(
         conflictAllergens: item.conflictAllergens || null,
         createdAt: now,
       });
-      transaction.set(db.collection('orderItems').doc(itemId), itemObj);
-    }
+      transaction.set(firestore.collection('orderItems').doc(itemId), itemObj);
+    });
 
-    // 6. Create Payment record
     const paymentId = generateId('PAY-');
-    const txnRef =
-      paymentDetails?.transactionRef ||
-      `CF-${Date.now().toString().slice(-8)}${Math.floor(100 + Math.random() * 900)}`;
-
     const payObj = cleanDoc({
       id: paymentId,
       orderId,
-      amount: paymentDetails?.amount || pending.totalAmount,
-      paymentMethod: paymentDetails?.paymentMethod || pending.paymentMethod || 'UPI',
+      amount: Number(payment.amount),
+      paymentMethod: payment.paymentMethod || pending.paymentMethod || 'UPI',
       status: 'SUCCESS',
-      transactionRef: String(txnRef),
-      upiId: paymentDetails?.upiId || pending.upiId || null,
-      cardLastFour: paymentDetails?.cardLastFour || pending.cardLastFour || null,
-      bankName: paymentDetails?.bankName || pending.bankName || null,
+      transactionRef: String(payment.transactionRef || payment.cashfreeOrderId || orderId),
+      upiId: payment.upiId || pending.upiId || null,
+      cardLastFour: payment.cardLastFour || pending.cardLastFour || null,
+      bankName: payment.bankName || pending.bankName || null,
       createdAt: now,
     });
-    transaction.set(db.collection('payments').doc(paymentId), payObj);
+    transaction.set(firestore.collection('payments').doc(paymentId), payObj);
 
-    // 7. Delete pending checkout document
     transaction.delete(pendingRef);
 
     return { success: true, orderId };
   });
 
-  try {
-    const { notifyOrdersUpdated } = await import('@/lib/sync-events');
-    await notifyOrdersUpdated();
-  } catch {
-    // non-blocking
+  if (result.success && !result.alreadyFulfilled) {
+    try {
+      const { notifyOrdersUpdated } = await import('@/lib/sync-events');
+      await notifyOrdersUpdated();
+    } catch {
+      // non-blocking
+    }
   }
 
   return result;
@@ -199,81 +282,93 @@ export async function fulfillParentOrder(
 
 /**
  * Fulfill and create teacher order ONLY when payment is successfully confirmed.
+ * Atomic and idempotent: repeated calls return alreadyFulfilled once the order exists.
  */
 export async function fulfillTeacherOrder(
   orderId: string,
-  paymentDetails?: {
-    transactionRef?: string;
-    cashfreeOrderId?: string | null;
-  }
-): Promise<{ success: boolean; orderId: string; alreadyFulfilled?: boolean }> {
+  payment: VerifiedPaymentDetails,
+  firestore: Firestore = db
+): Promise<FulfillmentResult> {
   const now = new Date().toISOString();
-  const orderRef = db.collection('teacher_orders').doc(orderId);
-  const pendingRef = db.collection('pending_teacher_orders').doc(orderId);
+  const orderRef = firestore.collection('teacher_orders').doc(orderId);
+  const pendingRef = firestore.collection('pending_teacher_orders').doc(orderId);
 
-  // 1. Check if order is already created
-  const existingOrderSnap = await orderRef.get();
-  if (existingOrderSnap.exists) {
-    const existingData = existingOrderSnap.data() || {};
-    if (existingData.paymentStatus === 'PAID') {
-      return { success: true, orderId, alreadyFulfilled: true };
+  const result = await firestore.runTransaction(async (transaction): Promise<FulfillmentResult> => {
+    const existingOrderSnap = await transaction.get(orderRef);
+    const pendingSnap = await transaction.get(pendingRef);
+
+    if (existingOrderSnap.exists) {
+      const existingData = existingOrderSnap.data() || {};
+      if (existingData.paymentStatus === 'PAID') {
+        return { success: true, orderId, alreadyFulfilled: true };
+      }
+      if (existingData.paymentStatus !== 'PENDING') {
+        return { success: false, orderId, reason: 'ORDER_NOT_PAYABLE', message: `Order is ${existingData.paymentStatus}` };
+      }
+      const mismatch = checkPaidAmount(payment, existingData.totalAmount);
+      if (mismatch) {
+        return { success: false, orderId, reason: 'AMOUNT_MISMATCH', message: mismatch };
+      }
+      transaction.update(orderRef, {
+        paymentStatus: 'PAID',
+        orderStatus: 'CONFIRMED',
+        cashfreeOrderId: payment.cashfreeOrderId || existingData.cashfreeOrderId || null,
+        updatedAt: now,
+      });
+      return { success: true, orderId };
     }
-    // Update legacy pending to PAID
-    await orderRef.update({
+
+    if (!pendingSnap.exists) {
+      throw new Error(`Pending teacher order ${orderId} not found`);
+    }
+
+    const pending = pendingSnap.data() as PendingTeacherOrder;
+
+    const mismatch = checkPaidAmount(payment, pending.totalAmount);
+    if (mismatch) {
+      transaction.update(pendingRef, {
+        status: 'NEEDS_REVIEW',
+        reviewReason: 'AMOUNT_MISMATCH',
+        paidAmount: Number(payment.amount) || 0,
+        updatedAt: now,
+      });
+      return { success: false, orderId, reason: 'AMOUNT_MISMATCH', message: mismatch };
+    }
+
+    const orderDoc = cleanDoc({
+      id: orderId,
+      orderType: 'TEACHER',
+      userId: pending.userId || null,
+      teacherName: pending.teacherName,
+      teacherPhone: pending.teacherPhone || null,
+      totalAmount: pending.totalAmount,
+      date: pending.date,
       paymentStatus: 'PAID',
       orderStatus: 'CONFIRMED',
-      cashfreeOrderId: paymentDetails?.cashfreeOrderId || existingData.cashfreeOrderId || null,
+      paymentMethod: 'ONLINE',
+      transactionRef: payment.transactionRef || null,
+      cashfreeOrderId: payment.cashfreeOrderId || pending.cashfreeOrderId || null,
+      paymentSessionId: pending.paymentSessionId || null,
+      notes: pending.notes || null,
+      items: pending.items || [],
+      createdAt: pending.createdAt || now,
       updatedAt: now,
     });
 
+    transaction.set(orderRef, orderDoc);
+    transaction.delete(pendingRef);
+
+    return { success: true, orderId };
+  });
+
+  if (result.success && !result.alreadyFulfilled) {
     try {
       const { notifyOrdersUpdated, notifyTeacherOrdersUpdated } = await import('@/lib/sync-events');
       await Promise.all([notifyOrdersUpdated(), notifyTeacherOrdersUpdated()]);
     } catch {
       // non-blocking
     }
-
-    return { success: true, orderId };
   }
 
-  // 2. Fetch pending teacher checkout
-  const pendingSnap = await pendingRef.get();
-  if (!pendingSnap.exists) {
-    throw new Error(`Pending teacher order ${orderId} not found`);
-  }
-
-  const pending = pendingSnap.data() as PendingTeacherOrder;
-
-  // 3. Create confirmed teacher order
-  const orderDoc = cleanDoc({
-    id: orderId,
-    orderType: 'TEACHER',
-    teacherName: pending.teacherName,
-    teacherPhone: pending.teacherPhone || null,
-    totalAmount: pending.totalAmount,
-    date: pending.date,
-    paymentStatus: 'PAID',
-    orderStatus: 'CONFIRMED',
-    paymentMethod: 'ONLINE',
-    cashfreeOrderId: paymentDetails?.cashfreeOrderId || pending.cashfreeOrderId || null,
-    paymentSessionId: pending.paymentSessionId || null,
-    notes: pending.notes || null,
-    items: pending.items || [],
-    createdAt: pending.createdAt || now,
-    updatedAt: now,
-  });
-
-  await orderRef.set(orderDoc);
-
-  // 4. Remove pending checkout
-  await pendingRef.delete().catch(() => {});
-
-  try {
-    const { notifyOrdersUpdated, notifyTeacherOrdersUpdated } = await import('@/lib/sync-events');
-    await Promise.all([notifyOrdersUpdated(), notifyTeacherOrdersUpdated()]);
-  } catch {
-    // non-blocking
-  }
-
-  return { success: true, orderId };
+  return result;
 }

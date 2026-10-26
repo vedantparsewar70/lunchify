@@ -1,4 +1,5 @@
 import { db } from './firebase-admin';
+import { categoryMenuDocId } from './menu-stock';
 import { FieldValue, type DocumentSnapshot, type Query, type DocumentReference, type Transaction } from 'firebase-admin/firestore';
 
 export interface DbUser {
@@ -1030,7 +1031,7 @@ export class FirestoreDbAdapter {
         doc = docData(snap);
       } else if (where.mealId_date_studentCategory) {
         const { mealId, date, studentCategory } = where.mealId_date_studentCategory;
-        const directId = `menu_${date}_${String(studentCategory || 'all').toLowerCase().replace(/\s+/g, '_')}`;
+        const directId = categoryMenuDocId(date, studentCategory);
         const snap = await db.collection('menus').doc(directId).get();
         if (snap.exists) {
           doc = docData(snap);
@@ -1098,7 +1099,7 @@ export class FirestoreDbAdapter {
         const snap = await ref.get();
         docExists = snap.exists;
       } else if (where.mealId_date_studentCategory) {
-        const docId = `menu_${date}_${String(studentCategory).toLowerCase().replace(/\s+/g, '_')}`;
+        const docId = categoryMenuDocId(date, studentCategory);
         ref = db.collection('menus').doc(docId);
         const snap = await ref.get();
         if (snap.exists) {
@@ -1231,7 +1232,12 @@ export class FirestoreDbAdapter {
     findMany: async ({ where, include, orderBy, take }: any = {}): Promise<DbOrder[]> => {
       let orders: any[] = [];
 
-      if (where?.id?.in && Array.isArray(where.id.in)) {
+      if (where?.id && typeof where.id === 'string') {
+        const snap = await db.collection('orders').doc(where.id).get();
+        if (snap.exists) {
+          orders = [docData(snap)];
+        }
+      } else if (where?.id?.in && Array.isArray(where.id.in)) {
         const map = await batchGetDocs('orders', where.id.in);
         orders = Array.from(map.values());
       } else {
@@ -1240,10 +1246,44 @@ export class FirestoreDbAdapter {
           query = query.where('parentId', '==', where.parentId);
         }
         if (where?.orderStatus) {
-          query = query.where('orderStatus', '==', where.orderStatus);
+          if (typeof where.orderStatus === 'string') {
+            query = query.where('orderStatus', '==', where.orderStatus);
+          } else if (Array.isArray(where.orderStatus?.in) && where.orderStatus.in.length > 0 && where.orderStatus.in.length <= 10) {
+            query = query.where('orderStatus', 'in', where.orderStatus.in);
+          }
+        }
+        if (where?.paymentStatus) {
+          if (typeof where.paymentStatus === 'string') {
+            query = query.where('paymentStatus', '==', where.paymentStatus);
+          } else if (Array.isArray(where.paymentStatus?.in) && where.paymentStatus.in.length > 0 && where.paymentStatus.in.length <= 10) {
+            query = query.where('paymentStatus', 'in', where.paymentStatus.in);
+          }
         }
         const snap = await query.get();
         orders = snap.docs.map((d) => docData(d));
+      }
+
+      // Comprehensive in-memory filtering: ensures paid-only queries do not leak unpaid/pending/failed orders
+      if (where?.parentId) {
+        orders = orders.filter((o) => o.parentId === where.parentId);
+      }
+      if (where?.orderStatus) {
+        if (typeof where.orderStatus === 'string') {
+          orders = orders.filter((o) => o.orderStatus === where.orderStatus);
+        } else if (Array.isArray(where.orderStatus?.in)) {
+          orders = orders.filter((o) => where.orderStatus.in.includes(o.orderStatus));
+        } else if (where.orderStatus?.not) {
+          orders = orders.filter((o) => o.orderStatus !== where.orderStatus.not);
+        }
+      }
+      if (where?.paymentStatus) {
+        if (typeof where.paymentStatus === 'string') {
+          orders = orders.filter((o) => o.paymentStatus === where.paymentStatus);
+        } else if (Array.isArray(where.paymentStatus?.in)) {
+          orders = orders.filter((o) => where.paymentStatus.in.includes(o.paymentStatus));
+        } else if (where.paymentStatus?.not) {
+          orders = orders.filter((o) => o.paymentStatus !== where.paymentStatus.not);
+        }
       }
 
       if (orderBy?.createdAt === 'desc') {
@@ -1370,17 +1410,25 @@ export class FirestoreDbAdapter {
         const snap = await db.collection('orders').doc(where.id).get();
         if (snap.exists) {
           const candidate = docData(snap);
-          if (!where.parentId || candidate.parentId === where.parentId) {
+          if (
+            (!where.parentId || candidate.parentId === where.parentId) &&
+            (!where.paymentStatus || candidate.paymentStatus === where.paymentStatus) &&
+            (!where.orderStatus || candidate.orderStatus === where.orderStatus)
+          ) {
             ord = candidate;
           }
         }
       } else if (where.parentId) {
         let query: Query = db.collection('orders').where('parentId', '==', where.parentId);
         if (where.orderStatus) query = query.where('orderStatus', '==', where.orderStatus);
+        if (where.paymentStatus) query = query.where('paymentStatus', '==', where.paymentStatus);
         const snap = await query.limit(1).get();
         if (!snap.empty) ord = docData(snap.docs[0]);
       } else {
-        const snap = await db.collection('orders').limit(1).get();
+        let query: Query = db.collection('orders');
+        if (where.orderStatus) query = query.where('orderStatus', '==', where.orderStatus);
+        if (where.paymentStatus) query = query.where('paymentStatus', '==', where.paymentStatus);
+        const snap = await query.limit(1).get();
         if (!snap.empty) ord = docData(snap.docs[0]);
       }
 

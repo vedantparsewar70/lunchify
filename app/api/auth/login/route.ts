@@ -78,75 +78,58 @@ export async function POST(req: Request) {
       // Prisma fallback handles missing connection
     }
 
-    // Auto-provision or sync admin account if env matches
+    // Auto-provision or sync admin account if env matches.
+    // If an account with this email already exists (e.g. someone registered it before the
+    // first admin login), its password is reset to the configured one when promoting it,
+    // so whoever registered it cannot log in to the elevated account with their own password.
     if (isAdminEnvMatch && envAdminPass && envAdminEmail) {
       if (!user) {
-        try {
-          const passwordHash = await hashPassword(envAdminPass);
-          user = await prisma.user.create({
-            data: {
-              id: 'usr_canteen_admin_01',
-              email: envAdminEmail,
-              name: 'Canteen Admin',
-              role: 'ADMIN',
-              passwordHash,
-            },
-          });
-        } catch {
-          user = {
+        const passwordHash = await hashPassword(envAdminPass);
+        user = await prisma.user.create({
+          data: {
             id: 'usr_canteen_admin_01',
             email: envAdminEmail,
             name: 'Canteen Admin',
             role: 'ADMIN',
-            passwordHash: '',
-          };
-        }
-      } else if (user.role !== 'ADMIN') {
-        try {
-          user = await prisma.user.upsert({
-            where: { id: user.id },
-            update: { role: 'ADMIN' },
-            create: { ...user, role: 'ADMIN' },
-          });
-        } catch {
-          user.role = 'ADMIN';
-        }
+            passwordHash,
+          },
+        });
+      } else if (user.role !== 'ADMIN' || !(await comparePassword(envAdminPass, user.passwordHash || ''))) {
+        const passwordHash = await hashPassword(envAdminPass);
+        const updatedAt = new Date().toISOString();
+        user = await prisma.user.upsert({
+          where: { id: user.id },
+          update: { role: 'ADMIN', passwordHash, updatedAt },
+          create: { ...user, role: 'ADMIN', passwordHash },
+        });
       }
     }
 
-    // Auto-provision or sync staff account if env matches
+    // Auto-provision or sync staff account if env matches (same takeover protection as admin)
     if (isStaffEnvMatch && envStaffPass && envStaffEmail) {
       if (!user) {
-        try {
-          const passwordHash = await hashPassword(envStaffPass);
-          user = await prisma.user.create({
-            data: {
-              id: 'usr_canteen_staff_01',
-              email: envStaffEmail,
-              name: 'Canteen Staff',
-              role: 'STAFF',
-              passwordHash,
-            },
-          });
-        } catch {
-          user = {
+        const passwordHash = await hashPassword(envStaffPass);
+        user = await prisma.user.create({
+          data: {
             id: 'usr_canteen_staff_01',
             email: envStaffEmail,
             name: 'Canteen Staff',
             role: 'STAFF',
-            passwordHash: '',
-          };
-        }
-      } else if (user.role !== 'STAFF' && user.role !== 'ADMIN') {
-        try {
-          user = await prisma.user.upsert({
-            where: { id: user.id },
-            update: { role: 'STAFF' },
-            create: { ...user, role: 'STAFF' },
-          });
-        } catch {
-          user.role = 'STAFF';
-        }
+            passwordHash,
+          },
+        });
+      } else if (
+        (user.role !== 'STAFF' && user.role !== 'ADMIN') ||
+        !(await comparePassword(envStaffPass, user.passwordHash || ''))
+      ) {
+        const passwordHash = await hashPassword(envStaffPass);
+        const role = user.role === 'ADMIN' ? 'ADMIN' : 'STAFF';
+        const updatedAt = new Date().toISOString();
+        user = await prisma.user.upsert({
+          where: { id: user.id },
+          update: { role, passwordHash, updatedAt },
+          create: { ...user, role, passwordHash },
+        });
       }
     }
 

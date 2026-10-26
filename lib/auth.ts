@@ -4,11 +4,25 @@ import { cookies } from 'next/headers';
 import prisma from './prisma';
 import { UserRole } from '@/types';
 
-function getJwtSecret(): Uint8Array {
-  const secretKey =
-    process.env.JWT_SECRET ||
-    'super-secure-school-mealbox-jwt-secret-key-2026';
-  return new TextEncoder().encode(secretKey);
+const DEV_ONLY_JWT_SECRET = 'local-development-only-jwt-secret-not-for-production';
+const MIN_JWT_SECRET_LENGTH = 32;
+
+/**
+ * JWT signing secret. Production must provide JWT_SECRET (at least 32 characters);
+ * the development fallback is never used when NODE_ENV is production.
+ */
+export function getJwtSecret(): Uint8Array {
+  const secretKey = process.env.JWT_SECRET?.trim();
+  if (secretKey) {
+    if (process.env.NODE_ENV === 'production' && secretKey.length < MIN_JWT_SECRET_LENGTH) {
+      throw new Error(`JWT_SECRET must be at least ${MIN_JWT_SECRET_LENGTH} characters in production.`);
+    }
+    return new TextEncoder().encode(secretKey);
+  }
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('JWT_SECRET is not set. Refusing to sign or verify sessions in production.');
+  }
+  return new TextEncoder().encode(DEV_ONLY_JWT_SECRET);
 }
 
 export const TOKEN_COOKIE_NAME = 'school_auth_token';
@@ -46,47 +60,73 @@ export async function verifySessionToken(token: string): Promise<TokenPayload | 
   }
 }
 
-export async function getCurrentUser() {
-  const cookieStore = await cookies();
-  const token = cookieStore.get(TOKEN_COOKIE_NAME)?.value;
-  if (!token) return null;
+export async function getCurrentUser(req?: Request) {
+  let token: string | undefined;
 
-  const payload = await verifySessionToken(token);
-  if (!payload?.userId) return null;
-
-  // Ultra-fast path for STAFF and ADMIN (no student/parent queries required)
-  if (payload.role === 'STAFF' || payload.role === 'ADMIN') {
-    return {
-      id: payload.userId,
-      email: payload.email,
-      name: payload.name,
-      phone: null,
-      role: payload.role as UserRole,
-      parentId: undefined,
-      students: [],
-    };
+  try {
+    const cookieStore = await cookies();
+    token = cookieStore.get(TOKEN_COOKIE_NAME)?.value;
+  } catch {
+    // cookies() might throw outside request lifecycle or in test scripts
   }
 
-  let user: any = null;
-  try {
-    user = await prisma.user.findUnique({
-      where: { id: payload.userId },
-      include: {
-        parent: {
-          include: {
-            students: {
-              where: { isActive: true },
-              orderBy: { name: 'asc' },
-            },
+  if (!token && req) {
+    const authHeader = req.headers.get('authorization') || req.headers.get('Authorization');
+    if (authHeader?.startsWith('Bearer ')) {
+      token = authHeader.slice(7).trim();
+    }
+  }
+
+  if (!token) return null;
+
+  return resolveSessionUser(token);
+}
+
+function loadUserById(userId: string) {
+  return prisma.user.findUnique({
+    where: { id: userId },
+    include: {
+      parent: {
+        include: {
+          students: {
+            where: { isActive: true },
+            orderBy: { name: 'asc' },
           },
         },
       },
-    });
-  } catch {
-    // Prisma fallback
+    },
+  });
+}
+
+/**
+ * The token only identifies the user. Role and parent link always come from the database,
+ * so deleted or demoted accounts lose access immediately instead of when the token expires.
+ */
+export async function resolveSessionUser(
+  token: string,
+  loadUser: (userId: string) => Promise<any> = loadUserById
+) {
+  const payload = await verifySessionToken(token);
+  if (!payload?.userId) return null;
+
+  let user: any = null;
+  try {
+    user = await loadUser(payload.userId);
+  } catch (err) {
+    // Fail closed: without a database answer the session cannot be trusted.
+    console.error('[Auth] Could not load session user:', err instanceof Error ? err.message : err);
+    return null;
   }
 
-  if (!user) {
+  return toSessionUser(user);
+}
+
+/**
+ * Builds the session user from the database record. Returns null for missing (deleted) users
+ * and users without a recognised role.
+ */
+export function toSessionUser(user: any) {
+  if (!user || !['PARENT', 'STAFF', 'ADMIN'].includes(user.role)) {
     return null;
   }
 

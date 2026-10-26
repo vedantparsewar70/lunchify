@@ -24,6 +24,7 @@ import {
 import VegBadge from '@/components/VegBadge';
 import { formatINR, formatDatePretty, getTodayString } from '@/lib/utils';
 import { useToast } from '@/components/ToastContext';
+import { useAuth } from '@/components/AuthContext';
 import { loadCashfreeSdk } from '@/lib/cashfree-client';
 import { useSyncWatcher } from '@/lib/client-sync';
 
@@ -45,6 +46,7 @@ interface CartEntry {
 export default function TeacherMenuPage() {
   const router = useRouter();
   const { showToast } = useToast();
+  const { user, isLoading: authLoading } = useAuth();
   const todayDateStr = getTodayString();
 
   const [meals, setMeals] = useState<TeacherMeal[]>([]);
@@ -61,6 +63,15 @@ export default function TeacherMenuPage() {
   const [notes, setNotes] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
+
+  useEffect(() => {
+    if (user?.name && !teacherName) {
+      setTeacherName(user.name);
+    }
+    if (user?.phone && !teacherPhone) {
+      setTeacherPhone(user.phone);
+    }
+  }, [user]);
 
   // Fetch teacher menu
   const fetchMenu = async (isBackground = false) => {
@@ -181,14 +192,17 @@ export default function TeacherMenuPage() {
         return;
       }
 
-      const { orderId, paymentSessionId } = data;
+      const { orderId, paymentSessionId, cashfreeMode } = data;
 
       // 2. Open Cashfree Checkout Modal
       if (paymentSessionId) {
         try {
+          // The server reports which Cashfree environment created the session.
+          if (cashfreeMode !== 'production' && cashfreeMode !== 'sandbox') {
+            throw new Error('Payment gateway mode was not provided by the server');
+          }
           const CashfreeSDK = await loadCashfreeSdk();
-          const mode = process.env.NEXT_PUBLIC_CASHFREE_ENV === 'prod' ? 'production' : 'sandbox';
-          const cashfree = CashfreeSDK({ mode });
+          const cashfree = CashfreeSDK({ mode: cashfreeMode });
 
           cashfree
             .checkout({
@@ -295,6 +309,37 @@ export default function TeacherMenuPage() {
             <Clock className="w-6 h-6 text-white" />
           </div>
         </div>
+
+        {/* Authentication & Role Notice */}
+        {user?.role === 'PARENT' && (
+          <div className="p-3.5 bg-amber-50 border border-amber-200 text-amber-900 text-xs rounded-2xl flex items-center justify-between gap-3 animate-in fade-in">
+            <div className="flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
+              <span>You are signed in as a Parent. The Teacher Menu is reserved for Staff & Faculty.</span>
+            </div>
+            <Link
+              href="/parent/menu"
+              className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-xl font-bold text-xs shrink-0 transition-colors"
+            >
+              Go to Parent Menu →
+            </Link>
+          </div>
+        )}
+
+        {!user && !authLoading && (
+          <div className="p-3.5 bg-slate-50 border border-slate-200 text-slate-800 text-xs rounded-2xl flex items-center justify-between gap-3 animate-in fade-in">
+            <div className="flex items-center gap-2">
+              <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0" />
+              <span>Staff or Faculty credentials required to place teacher orders.</span>
+            </div>
+            <Link
+              href="/login?role=staff"
+              className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold text-xs shrink-0 transition-colors"
+            >
+              Sign In as Staff →
+            </Link>
+          </div>
+        )}
 
         {/* Category Filters */}
         <div className="flex items-center gap-2 overflow-x-auto pb-1 scrollbar-none">

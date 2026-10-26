@@ -14,7 +14,8 @@
     "db:verify-firestore": "npx tsx scripts/verify-firebase.ts",
     "db:import-sqlite": "npx tsx scripts/restore-to-postgres.ts",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "tsx --test tests/*.test.ts"
   },
   "prisma": {
     "seed": "npx tsx prisma/seed.ts"

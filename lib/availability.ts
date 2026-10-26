@@ -10,6 +10,7 @@ export interface MealItemAvailability {
   isDeadlinePassed: boolean;
   availableQuantity: number;
   serverPrice: number;
+  menuId?: string | null;
   reason?: string;
 }
 
@@ -29,7 +30,7 @@ export interface CartAvailabilityValidation {
  * 2. Date must be valid format (YYYY-MM-DD) and not in the past.
  * 3. Quantity must be a valid positive integer (1-20).
  * 4. Menu record must exist for the (mealId, date) combination and have `isActive === true`.
- * 5. `availableQuantity` must be > 0 and sufficient for the requested portion.
+ * 5. `availableQuantity` must be > 0 and sufficient for the portions requested across the whole cart.
  * 6. The ordering deadline for that date must not have passed in Asia/Kolkata timezone.
  */
 export async function validateCartAvailability(
@@ -76,6 +77,8 @@ export async function validateCartAvailability(
   };
 
   const itemResults: MealItemAvailability[] = [];
+  // Portions already requested by earlier cart lines, per menu record
+  const requestedByMenu = new Map<string, number>();
 
   for (const item of cartItems) {
     const meal = mealsMap.get(item.mealId);
@@ -210,7 +213,9 @@ export async function validateCartAvailability(
     }
 
     const availableQuantity = Number(menuRecord.availableQuantity ?? 0);
-    if (availableQuantity <= 0 || availableQuantity < rawQty) {
+    const menuKey = String(menuRecord.id || `${menuRecord.mealId}_${menuRecord.date}_${menuRecord.studentCategory || 'ALL'}`);
+    const alreadyRequested = requestedByMenu.get(menuKey) || 0;
+    if (availableQuantity <= 0 || availableQuantity < alreadyRequested + rawQty) {
       itemResults.push({
         mealId: item.mealId,
         date: item.date,
@@ -243,6 +248,7 @@ export async function validateCartAvailability(
       continue;
     }
 
+    requestedByMenu.set(menuKey, alreadyRequested + rawQty);
     itemResults.push({
       mealId: item.mealId,
       date: item.date,
@@ -252,6 +258,7 @@ export async function validateCartAvailability(
       isDeadlinePassed: false,
       availableQuantity,
       serverPrice,
+      menuId: menuRecord.id || null,
     });
   }
 

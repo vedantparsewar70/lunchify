@@ -1,7 +1,13 @@
 import { NextResponse } from 'next/server';
-import { verifyCashfreeWebhookSignature } from '@/lib/cashfree';
+import {
+  getCashfreeRefund,
+  getVerifiedCashfreePayment,
+  paymentDetailsFromCashfree,
+  verifyCashfreeWebhookSignature,
+} from '@/lib/cashfree';
 import { db } from '@/lib/firebase-admin';
 import { fulfillParentOrder, fulfillTeacherOrder } from '@/lib/order-fulfillment';
+import { applyRefundStatus } from '@/lib/order-cancellation';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -31,62 +37,57 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'Malformed JSON payload' }, { status: 400 });
     }
 
-    const eventType = payload.type || payload.event || '';
-    const orderObj = payload.data?.order || {};
-    const paymentObj = payload.data?.payment || {};
-    const orderId = orderObj.order_id;
+    const eventType = String(payload.type || payload.event || '');
 
+    // Refund status updates: confirm the refund with the Cashfree API before recording it.
+    if (eventType.startsWith('REFUND')) {
+      const refundObj = payload.data?.refund || {};
+      if (refundObj.order_id && refundObj.refund_id) {
+        const refund = await getCashfreeRefund(String(refundObj.order_id), String(refundObj.refund_id));
+        const status = await applyRefundStatus(String(refundObj.order_id), refund);
+        console.log(`[Cashfree Webhook] Refund for order ${refundObj.order_id} is now ${status}`);
+      }
+      return NextResponse.json({ success: true, received: true });
+    }
+
+    const orderId = payload.data?.order?.order_id;
     if (!orderId) {
       return NextResponse.json({ received: true, message: 'No order_id present' });
     }
 
-    // Only fulfill and create orders on verified SUCCESS events
-    if (eventType === 'PAYMENT_SUCCESS_WEBHOOK' || paymentObj.payment_status === 'SUCCESS') {
-      const txnRef =
-        paymentObj.cf_payment_id ||
-        paymentObj.bank_reference ||
-        `CF-${Date.now().toString().slice(-8)}`;
-
-      let methodStr = 'UPI';
-      const rawMethod = typeof paymentObj.payment_method === 'object' ? Object.keys(paymentObj.payment_method)[0]?.toUpperCase() : '';
-      if (rawMethod.includes('CARD')) methodStr = 'CARD';
-      else if (rawMethod.includes('NET') || rawMethod.includes('NB')) methodStr = 'NET_BANKING';
-      else if (rawMethod.includes('UPI')) methodStr = 'UPI';
-
-      const upiId = paymentObj.payment_method?.upi?.upi_id || null;
-      const cardLastFour = paymentObj.payment_method?.card?.card_number ? paymentObj.payment_method.card.card_number.slice(-4) : null;
-      const bankName = paymentObj.payment_method?.netbanking?.netbanking_bank_name || null;
-
-      // Check if this is a Teacher order
-      const isTeacherId = orderId.startsWith('TCH-') || orderId.startsWith('TORD-');
-      const pendingTeacherSnap = await db.collection('pending_teacher_orders').doc(orderId).get();
-
-      if (isTeacherId || pendingTeacherSnap.exists) {
-        await fulfillTeacherOrder(orderId, {
-          transactionRef: String(txnRef),
-          cashfreeOrderId: orderObj.cf_order_id || null,
-        });
-        console.log(`[Cashfree Webhook] Teacher Order ${orderId} successfully confirmed via webhook!`);
-      } else {
-        await fulfillParentOrder(orderId, {
-          transactionRef: String(txnRef),
-          paymentMethod: methodStr,
-          upiId,
-          cardLastFour,
-          bankName,
-          cashfreeOrderId: orderObj.cf_order_id || null,
-          amount: Number(paymentObj.payment_amount || 0),
-        });
-        console.log(`[Cashfree Webhook] Parent Order ${orderId} successfully confirmed via webhook!`);
-      }
-    } else {
+    const paymentObj = payload.data?.payment || {};
+    if (eventType !== 'PAYMENT_SUCCESS_WEBHOOK' && paymentObj.payment_status !== 'SUCCESS') {
       // Payment failed or incomplete: Strictly DO NOT create any order!
       console.log(`[Cashfree Webhook] Non-success event (${eventType}) for order ${orderId}. Strictly no order created.`);
+      return NextResponse.json({ success: true, received: true });
+    }
+
+    // The payload is only a hint: payment status, amount and currency come from the Cashfree API.
+    const verified = await getVerifiedCashfreePayment(String(orderId));
+    if (!verified.paid) {
+      console.warn(`[Cashfree Webhook] Order ${orderId} is ${verified.orderStatus} on Cashfree; no order created.`);
+      return NextResponse.json({ success: true, received: true });
+    }
+    const details = paymentDetailsFromCashfree(verified);
+
+    const isTeacherId = orderId.startsWith('TCH-') || orderId.startsWith('TORD-');
+    const pendingTeacherSnap = isTeacherId ? null : await db.collection('pending_teacher_orders').doc(orderId).get();
+
+    // Fulfilment is idempotent, so repeated deliveries of the same event cannot create duplicate orders.
+    const result = isTeacherId || pendingTeacherSnap?.exists
+      ? await fulfillTeacherOrder(orderId, details)
+      : await fulfillParentOrder(orderId, details);
+
+    if (!result.success) {
+      // Recorded for canteen review; acknowledge so the gateway does not keep retrying.
+      console.error(`[Cashfree Webhook] Order ${orderId} needs review: ${result.reason} - ${result.message}`);
+    } else if (!result.alreadyFulfilled) {
+      console.log(`[Cashfree Webhook] Order ${orderId} confirmed via webhook.`);
     }
 
     return NextResponse.json({ success: true, received: true });
   } catch (error: any) {
     console.error('[Cashfree Webhook Error]:', error);
-    return NextResponse.json({ error: error.message || 'Webhook processing failed' }, { status: 500 });
+    return NextResponse.json({ error: 'Webhook processing failed' }, { status: 500 });
   }
 }

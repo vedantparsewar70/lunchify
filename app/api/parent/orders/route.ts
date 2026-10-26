@@ -5,16 +5,84 @@ import { isDeadlinePassed } from '@/lib/utils';
 import { CartItem, PaymentMethod } from '@/types';
 import { evaluateAllergyConflict, getSystemSetting } from '@/lib/allergy';
 import { db } from '@/lib/firebase-admin';
-import { FieldValue } from 'firebase-admin/firestore';
-import { cleanDoc, generateId } from '@/lib/firestore-db';
 import { checkRateLimit, getClientIp } from '@/lib/rate-limiter';
-import { createCashfreeOrder, getCashfreeOrder } from '@/lib/cashfree';
+import {
+  createCashfreeOrder,
+  getAppBaseUrl,
+  getCashfreeMode,
+  getCashfreeOrder,
+  isCashfreeConfigured,
+  isMockPaymentAllowed,
+  PaymentConfigError,
+} from '@/lib/cashfree';
 import { BUSINESS_CONFIG } from '@/lib/business-config';
-import { savePendingParentOrder, fulfillParentOrder } from '@/lib/order-fulfillment';
+import { savePendingParentOrder, fulfillParentOrder, generateParentOrderId } from '@/lib/order-fulfillment';
+import { cancelOrderWithRefund, OrderCancellationError } from '@/lib/order-cancellation';
 import { validateCartAvailability } from '@/lib/availability';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
+
+function currentCashfreeMode(): string | null {
+  try {
+    return getCashfreeMode();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Response for a repeated checkout submission, or null if nothing exists yet for this order ID.
+ * Records belonging to a different parent are never returned.
+ */
+async function existingCheckoutResponse(orderId: string, parentId: string): Promise<NextResponse | null> {
+  const existingOrder = await prisma.order.findUnique({
+    where: { id: orderId },
+    include: {
+      items: {
+        include: {
+          student: true,
+          meal: true,
+        },
+      },
+      payments: true,
+    },
+  });
+
+  if (existingOrder) {
+    if (existingOrder.parentId !== parentId) {
+      return NextResponse.json({ error: 'This checkout request could not be processed. Please retry.' }, { status: 409 });
+    }
+    return NextResponse.json({
+      success: true,
+      orderId: existingOrder.id,
+      totalAmount: existingOrder.totalAmount,
+      order: existingOrder,
+      isDuplicateSubmission: true,
+    });
+  }
+
+  // Pending checkout session: return it to prevent duplicate Cashfree payment sessions
+  const pendingSnap = await db.collection('pending_orders').doc(orderId).get();
+  if (pendingSnap.exists) {
+    const pendingData = pendingSnap.data() as any;
+    if (pendingData?.parentId !== parentId) {
+      return NextResponse.json({ error: 'This checkout request could not be processed. Please retry.' }, { status: 409 });
+    }
+    return NextResponse.json({
+      success: true,
+      orderId,
+      paymentSessionId: pendingData?.paymentSessionId || null,
+      cfOrderId: pendingData?.cashfreeOrderId || null,
+      isCashfree: Boolean(pendingData?.paymentSessionId),
+      cashfreeMode: currentCashfreeMode(),
+      totalAmount: pendingData?.totalAmount,
+      isDuplicateSubmission: true,
+    });
+  }
+
+  return null;
+}
 
 export async function GET(req: Request) {
   try {
@@ -102,10 +170,11 @@ export async function POST(req: Request) {
     if (!user || user.role !== 'PARENT' || !user.parentId) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
+    const parentId = user.parentId;
 
     // Rate Limiting: 30 checkout submissions per minute per parent
     const clientIp = getClientIp(req);
-    const rateLimit = checkRateLimit(`order_${user.parentId}_${clientIp}`, {
+    const rateLimit = checkRateLimit(`order_${parentId}_${clientIp}`, {
       windowMs: 60000,
       maxRequests: 30,
     });
@@ -138,60 +207,28 @@ export async function POST(req: Request) {
       idempotencyKey?: string;
     } = body;
 
-    requestKey = idempotencyKey;
+    // Order IDs are always generated on the server; the idempotency key only makes retries deterministic.
+    const hasIdempotencyKey = typeof idempotencyKey === 'string' && idempotencyKey.length > 0;
+    const orderId = generateParentOrderId(parentId, hasIdempotencyKey ? idempotencyKey : null);
 
-    // Check for duplicate submission using idempotency key if provided
-    if (idempotencyKey) {
-      const existingOrder = await prisma.order.findUnique({
-        where: { id: idempotencyKey },
-        include: {
-          items: {
-            include: {
-              student: true,
-              meal: true,
-            },
-          },
-          payments: true,
-        },
-      });
-
-      if (existingOrder) {
-        return NextResponse.json({
-          success: true,
-          orderId: existingOrder.id,
-          totalAmount: existingOrder.totalAmount,
-          order: existingOrder,
-          isDuplicateSubmission: true,
-        });
-      }
-
-      // Check for pending checkout session to prevent duplicate Cashfree payment sessions
-      const pendingSnap = await db.collection('pending_orders').doc(idempotencyKey).get();
-      if (pendingSnap.exists) {
-        const pendingData = pendingSnap.data() as any;
-        return NextResponse.json({
-          success: true,
-          orderId: idempotencyKey,
-          paymentSessionId: pendingData?.paymentSessionId || null,
-          cfOrderId: pendingData?.cashfreeOrderId || null,
-          isCashfree: Boolean(pendingData?.paymentSessionId),
-          totalAmount: pendingData?.totalAmount,
-          isDuplicateSubmission: true,
-        });
-      }
+    // Check for duplicate submission of the same checkout
+    if (hasIdempotencyKey) {
+      const duplicate = await existingCheckoutResponse(orderId, parentId);
+      if (duplicate) return duplicate;
     }
 
     // Atomic Concurrency Lock: Prevent simultaneous parallel checkouts from creating duplicate sessions
-    if (idempotencyKey) {
-      const lockRef = db.collection('idempotency_locks').doc(idempotencyKey);
+    if (hasIdempotencyKey) {
+      requestKey = orderId;
+      const lockRef = db.collection('idempotency_locks').doc(orderId);
       lockToken = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
       const nowMs = Date.now();
       const LOCK_TTL_MS = 30000;
 
       try {
         await lockRef.create({
-          id: idempotencyKey,
-          parentId: user.parentId,
+          id: orderId,
+          parentId,
           createdAt: new Date().toISOString(),
           createdAtMs: nowMs,
           status: 'PROCESSING',
@@ -214,8 +251,8 @@ export async function POST(req: Request) {
                   const freshAge = Date.now() - (freshData?.createdAtMs || new Date(freshData?.createdAt || 0).getTime() || 0);
                   if (freshAge > LOCK_TTL_MS) {
                     t.set(lockRef, {
-                      id: idempotencyKey,
-                      parentId: user.parentId,
+                      id: orderId,
+                      parentId,
                       createdAt: new Date().toISOString(),
                       createdAtMs: Date.now(),
                       status: 'PROCESSING',
@@ -232,43 +269,17 @@ export async function POST(req: Request) {
             for (let attempt = 0; attempt < 15; attempt++) {
               await new Promise((resolve) => setTimeout(resolve, 200));
 
-              // Check if order was completed and confirmed
-              const readyOrder = await prisma.order.findUnique({
-                where: { id: idempotencyKey },
-                include: { items: { include: { student: true, meal: true } }, payments: true },
-              });
-              if (readyOrder) {
-                return NextResponse.json({
-                  success: true,
-                  orderId: readyOrder.id,
-                  totalAmount: readyOrder.totalAmount,
-                  order: readyOrder,
-                  isDuplicateSubmission: true,
-                });
-              }
-
-              // Check if pending checkout session is saved
-              const readyPending = await db.collection('pending_orders').doc(idempotencyKey).get();
-              if (readyPending.exists) {
-                const pendingData = readyPending.data() as any;
-                return NextResponse.json({
-                  success: true,
-                  orderId: idempotencyKey,
-                  paymentSessionId: pendingData?.paymentSessionId || null,
-                  cfOrderId: pendingData?.cashfreeOrderId || null,
-                  isCashfree: Boolean(pendingData?.paymentSessionId),
-                  totalAmount: pendingData?.totalAmount,
-                  isDuplicateSubmission: true,
-                });
-              }
+              // Check if the concurrent request completed the order or saved the pending checkout
+              const ready = await existingCheckoutResponse(orderId, parentId);
+              if (ready) return ready;
 
               // Check if lock was released by earlier request (e.g. error or validation failure)
               const checkLock = await lockRef.get();
               if (!checkLock.exists) {
                 try {
                   await lockRef.create({
-                    id: idempotencyKey,
-                    parentId: user.parentId,
+                    id: orderId,
+                    parentId,
                     createdAt: new Date().toISOString(),
                     createdAtMs: Date.now(),
                     status: 'PROCESSING',
@@ -301,7 +312,7 @@ export async function POST(req: Request) {
 
     // Check parent record
     const parentRecord = await prisma.parent.findUnique({
-      where: { id: user.parentId },
+      where: { id: parentId },
     });
     if (!parentRecord) {
       return NextResponse.json({ error: 'Parent record not found' }, { status: 404 });
@@ -309,7 +320,7 @@ export async function POST(req: Request) {
 
     // Verify all students belong to this parent and load their allergies in 1 parallel query
     const parentStudents = await prisma.student.findMany({
-      where: { parentId: user.parentId, isActive: true },
+      where: { parentId, isActive: true },
       include: {
         studentAllergies: { include: { allergy: true } },
       },
@@ -336,6 +347,7 @@ export async function POST(req: Request) {
     const mealsMap = new Map(meals.map((m: any) => [m.id, m]));
 
     // Authoritative Server-side Menu Availability Validation (Single Source of Truth)
+    // The student category always comes from the student record, never from the client.
     const cartItemsWithCategory = cartItems.map((it) => {
       const student = parentStudentsMap.get(it.studentId);
       const studentCategory =
@@ -370,7 +382,7 @@ export async function POST(req: Request) {
 
     // Authoritative Server-side Price & Allergy Evaluation
     let totalAmount = 0;
-    const evaluatedCartItems = cartItems.map((item) => {
+    const evaluatedCartItems = cartItemsWithCategory.map((item, index) => {
       const meal = mealsMap.get(item.mealId);
       if (!meal) {
         throw new Error(`Meal not found: ${item.mealName || item.mealId}`);
@@ -410,6 +422,7 @@ export async function POST(req: Request) {
       return {
         ...item,
         quantity: itemQuantity,
+        menuId: availabilityResult.items[index]?.menuId || null,
         mealPrice: serverUnitPrice,
         mealName: meal.name,
         mealCategory: meal.category,
@@ -418,6 +431,7 @@ export async function POST(req: Request) {
         conflictAllergens: allergyResult.matchingAllergens.join(', ') || null,
       };
     });
+    totalAmount = Math.round(totalAmount * 100) / 100;
 
     // Check school allergy policy
     const allowAllergySetting = await getSystemSetting('ALLOW_ALLERGY_ORDERS', 'true');
@@ -449,72 +463,61 @@ export async function POST(req: Request) {
       );
     }
 
-    // Generate collision-resistant unique identifiers
-    const randomSuffix = `${Date.now()}-${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
-    const orderId = idempotencyKey || `ORD-${randomSuffix}`;
-    const paymentId = `PAY-${randomSuffix}`;
-    const txnRef =
-      paymentMethod === 'UPI'
-        ? `UPI-${Date.now().toString().slice(-8)}${Math.floor(100 + Math.random() * 900)}`
-        : paymentMethod === 'CARD'
-        ? `CARD-${Date.now().toString().slice(-8)}`
-        : `NETB-${Date.now().toString().slice(-8)}`;
+    // DEF-03: Production Payment Gateway Enforcement
+    // Without Cashfree, checkout fails closed. Mock auto-fulfillment is only allowed when
+    // explicitly enabled in an isolated non-production test environment.
+    const isCashfreeEnabled = isCashfreeConfigured();
+    if (!isCashfreeEnabled && !isMockPaymentAllowed()) {
+      console.error('[Payment Gateway Error]: Cashfree credentials are not configured.');
+      return NextResponse.json(
+        { error: 'Online payment gateway is temporarily unavailable. Please try again later or contact school canteen.' },
+        { status: 503 }
+      );
+    }
+
+    // Return and webhook URLs come from trusted configuration, never from request Host headers
+    let originUrl = '';
+    let cashfreeMode: string | null = null;
+    if (isCashfreeEnabled) {
+      try {
+        cashfreeMode = getCashfreeMode();
+        originUrl = getAppBaseUrl();
+      } catch (configErr) {
+        if (configErr instanceof PaymentConfigError) {
+          console.error('[Payment Config Error]:', configErr.message);
+          return NextResponse.json(
+            { error: 'Online payment gateway is temporarily unavailable. Please try again later or contact school canteen.' },
+            { status: 503 }
+          );
+        }
+        throw configErr;
+      }
+    }
 
     const now = new Date().toISOString();
-
-    // Determine host for Cashfree return and webhook notifications
-    const proto = req.headers.get('x-forwarded-proto') || (req.url.startsWith('https://') ? 'https' : 'http');
-    const host = req.headers.get('host') || 'localhost:3000';
-    const originUrl = `${proto}://${host}`;
-
-    const isCashfreeEnabled = Boolean(process.env.CASHFREE_APP_ID && process.env.CASHFREE_SECRET_KEY);
     let cfSession: any = null;
 
     const hasLockOwnership = async (): Promise<boolean> => {
-      if (!idempotencyKey || !lockToken) return true;
+      if (!requestKey || !lockToken) return true;
       try {
-        const currentLockSnap = await db.collection('idempotency_locks').doc(idempotencyKey).get();
+        const currentLockSnap = await db.collection('idempotency_locks').doc(requestKey).get();
         return currentLockSnap.exists && currentLockSnap.data()?.lockToken === lockToken;
       } catch {
         return false;
       }
     };
 
+    const lockLostResponse = async (): Promise<NextResponse> => {
+      const existing = await existingCheckoutResponse(orderId, parentId);
+      return existing || NextResponse.json(
+        { error: 'Checkout session lock expired and was reclaimed by a concurrent request. Please retry.' },
+        { status: 409 }
+      );
+    };
+
     // Pre-gateway Lock Ownership Check: abort if another request reclaimed our expired lock
-    if (idempotencyKey && lockToken) {
-      const isOwner = await hasLockOwnership();
-      if (!isOwner) {
-        const existingOrder = await prisma.order.findUnique({
-          where: { id: idempotencyKey },
-          include: { items: { include: { student: true, meal: true } }, payments: true },
-        });
-        if (existingOrder) {
-          return NextResponse.json({
-            success: true,
-            orderId: existingOrder.id,
-            totalAmount: existingOrder.totalAmount,
-            order: existingOrder,
-            isDuplicateSubmission: true,
-          });
-        }
-        const existingPending = await db.collection('pending_orders').doc(idempotencyKey).get();
-        if (existingPending.exists) {
-          const pendingData = existingPending.data() as any;
-          return NextResponse.json({
-            success: true,
-            orderId: idempotencyKey,
-            paymentSessionId: pendingData?.paymentSessionId || null,
-            cfOrderId: pendingData?.cashfreeOrderId || null,
-            isCashfree: Boolean(pendingData?.paymentSessionId),
-            totalAmount: pendingData?.totalAmount,
-            isDuplicateSubmission: true,
-          });
-        }
-        return NextResponse.json(
-          { error: 'Checkout session lock expired and was reclaimed by a concurrent request. Please retry.' },
-          { status: 409 }
-        );
-      }
+    if (!(await hasLockOwnership())) {
+      return lockLostResponse();
     }
 
     if (isCashfreeEnabled) {
@@ -537,7 +540,8 @@ export async function POST(req: Request) {
         if (cfErr.message?.includes('already present') || cfErr.message?.includes('already exists')) {
           try {
             const existingCf = await getCashfreeOrder(orderId);
-            if (existingCf) {
+            // Only reuse an existing gateway order if it is for exactly this amount.
+            if (existingCf && Math.abs(Number(existingCf.order_amount) - totalAmount) < 0.01) {
               cfSession = {
                 cfOrderId: String(existingCf.cf_order_id || ''),
                 orderId: existingCf.order_id,
@@ -554,81 +558,20 @@ export async function POST(req: Request) {
 
         if (!cfSession) {
           return NextResponse.json(
-            { error: `Payment gateway error: ${cfErr.message || 'Failed to initialize payment session'}` },
-            { status: 500 }
+            { error: 'Payment gateway error: failed to initialize payment session. Please try again.' },
+            { status: 502 }
           );
         }
       }
     }
 
     // Pre-write Lock Ownership Check: abort before writing if another request reclaimed our expired lock
-    if (idempotencyKey && lockToken) {
-      const stillOwner = await hasLockOwnership();
-      if (!stillOwner) {
-        const existingOrder = await prisma.order.findUnique({
-          where: { id: idempotencyKey },
-          include: { items: { include: { student: true, meal: true } }, payments: true },
-        });
-        if (existingOrder) {
-          return NextResponse.json({
-            success: true,
-            orderId: existingOrder.id,
-            totalAmount: existingOrder.totalAmount,
-            order: existingOrder,
-            isDuplicateSubmission: true,
-          });
-        }
-        const existingPending = await db.collection('pending_orders').doc(idempotencyKey).get();
-        if (existingPending.exists) {
-          const pendingData = existingPending.data() as any;
-          return NextResponse.json({
-            success: true,
-            orderId: idempotencyKey,
-            paymentSessionId: pendingData?.paymentSessionId || null,
-            cfOrderId: pendingData?.cashfreeOrderId || null,
-            isCashfree: Boolean(pendingData?.paymentSessionId),
-            totalAmount: pendingData?.totalAmount,
-            isDuplicateSubmission: true,
-          });
-        }
-        return NextResponse.json(
-          { error: 'Checkout session lock expired and was reclaimed by a concurrent request. Please retry.' },
-          { status: 409 }
-        );
-      }
+    if (!(await hasLockOwnership())) {
+      return lockLostResponse();
     }
 
-    // If Cashfree Payment Gateway is enabled, save as pending checkout intent.
-    // Strictly DO NOT create any record in 'orders', 'orderItems', or 'payments',
-    // and DO NOT decrement portions until payment is verified as PAID!
-    if (isCashfreeEnabled) {
-      await savePendingParentOrder({
-        id: orderId,
-        parentId: parentRecord.id,
-        totalAmount,
-        paymentMethod,
-        upiId: upiId || null,
-        cardLastFour: cardLastFour || null,
-        bankName: bankName || null,
-        notes: notes || null,
-        cartItems: evaluatedCartItems,
-        cashfreeOrderId: cfSession?.cfOrderId || null,
-        paymentSessionId: cfSession?.paymentSessionId || null,
-        createdAt: now,
-      });
-
-      return NextResponse.json({
-        success: true,
-        orderId,
-        paymentSessionId: cfSession?.paymentSessionId || null,
-        cfOrderId: cfSession?.cfOrderId || null,
-        isCashfree: true,
-        totalAmount,
-      });
-    }
-
-    // Direct fallback (when Cashfree is disabled for local mock testing):
-    // Save pending and immediately fulfill as PAID
+    // Save as pending checkout intent. Strictly DO NOT create any record in 'orders',
+    // 'orderItems', or 'payments', and DO NOT decrement portions until payment is verified as PAID!
     await savePendingParentOrder({
       id: orderId,
       parentId: parentRecord.id,
@@ -639,19 +582,39 @@ export async function POST(req: Request) {
       bankName: bankName || null,
       notes: notes || null,
       cartItems: evaluatedCartItems,
-      cashfreeOrderId: null,
-      paymentSessionId: null,
+      cashfreeOrderId: cfSession?.cfOrderId || null,
+      paymentSessionId: cfSession?.paymentSessionId || null,
       createdAt: now,
     });
 
+    if (isCashfreeEnabled) {
+      return NextResponse.json({
+        success: true,
+        orderId,
+        paymentSessionId: cfSession?.paymentSessionId || null,
+        cfOrderId: cfSession?.cfOrderId || null,
+        isCashfree: true,
+        cashfreeMode,
+        totalAmount,
+      });
+    }
+
+    // Explicitly isolated development/test mock fallback ONLY (isMockPaymentAllowed() checked above)
+    console.warn(`[DEV TEST MODE]: Cashfree disabled. Auto-fulfilling order ${orderId} in local dev mode.`);
+    const transactionRef = `MOCK-${Date.now().toString().slice(-8)}`;
     const fulfillRes = await fulfillParentOrder(orderId, {
-      transactionRef: txnRef,
+      amount: totalAmount,
+      currency: 'INR',
+      transactionRef,
       paymentMethod,
       upiId: upiId || null,
       cardLastFour: cardLastFour || null,
       bankName: bankName || null,
-      amount: totalAmount,
     });
+
+    if (!fulfillRes.success) {
+      return NextResponse.json({ error: fulfillRes.message || 'Order could not be confirmed' }, { status: 409 });
+    }
 
     return NextResponse.json({
       success: true,
@@ -659,8 +622,7 @@ export async function POST(req: Request) {
       paymentSessionId: null,
       cfOrderId: null,
       isCashfree: false,
-      paymentId,
-      transactionRef: txnRef,
+      transactionRef,
       totalAmount,
     });
   } catch (error: any) {
@@ -691,8 +653,8 @@ export async function PATCH(req: Request) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
-    const { orderId } = await req.json();
-    if (!orderId) {
+    const { orderId } = await req.json().catch(() => ({}));
+    if (!orderId || typeof orderId !== 'string') {
       return NextResponse.json({ error: 'Order ID is required' }, { status: 400 });
     }
 
@@ -703,7 +665,6 @@ export async function PATCH(req: Request) {
       },
       include: {
         items: true,
-        payments: true,
       },
     });
 
@@ -711,7 +672,12 @@ export async function PATCH(req: Request) {
       return NextResponse.json({ error: 'Order not found' }, { status: 404 });
     }
 
-    if (order.orderStatus === 'CANCELLED') {
+    // A cancelled order whose refund is still pending or failed may be retried; anything else is final.
+    const isRefundRetry =
+      order.orderStatus === 'CANCELLED' &&
+      (order.paymentStatus === 'REFUND_PENDING' || order.paymentStatus === 'REFUND_FAILED');
+
+    if (order.orderStatus === 'CANCELLED' && !isRefundRetry) {
       return NextResponse.json({ error: 'Order is already cancelled' }, { status: 400 });
     }
 
@@ -723,58 +689,56 @@ export async function PATCH(req: Request) {
     }
 
     // Check deadlines for each item in the order
-    for (const item of order.items || []) {
-      const menu = await prisma.menu.findUnique({
-        where: {
-          mealId_date: {
-            mealId: item.mealId,
-            date: item.date,
+    if (!isRefundRetry) {
+      for (const item of order.items || []) {
+        const menu = await prisma.menu.findUnique({
+          where: {
+            mealId_date: {
+              mealId: item.mealId,
+              date: item.date,
+            },
           },
-        },
-      });
+        });
 
-      const deadline = menu?.orderingDeadline || '08:30';
-      if (isDeadlinePassed(item.date, deadline)) {
-        return NextResponse.json(
-          {
-            error: `Cannot cancel: Cancellation deadline (${deadline}) for meal date ${item.date} has passed.`,
-          },
-          { status: 400 }
-        );
+        const deadline = menu?.orderingDeadline || '08:30';
+        if (isDeadlinePassed(item.date, deadline)) {
+          return NextResponse.json(
+            {
+              error: `Cannot cancel: Cancellation deadline (${deadline}) for meal date ${item.date} has passed.`,
+            },
+            { status: 400 }
+          );
+        }
       }
     }
 
-    const now = new Date().toISOString();
-
-    // Atomic cancellation transaction: updates status and restores available stock
-    await db.runTransaction(async (transaction) => {
-      const orderRef = db.collection('orders').doc(order.id);
-
-      // 1. Mark order cancelled and refunded
-      transaction.update(orderRef, {
-        orderStatus: 'CANCELLED',
-        paymentStatus: 'REFUNDED',
-        updatedAt: now,
-      });
-
-      // 2. Restore available portion quantities for each menu item
-      for (const item of order.items || []) {
-        const menuRef = db.collection('menus').doc(`${item.mealId}_${item.date}`);
-        transaction.update(menuRef, {
-          availableQuantity: FieldValue.increment(Number(item.quantity)),
-          updatedAt: now,
-        });
-      }
+    // Cancels, restores stock once, and refunds through Cashfree. REFUNDED is only
+    // reported once the gateway confirms the refund.
+    const result = await cancelOrderWithRefund({
+      orderId: order.id,
+      parentId: user.parentId,
+      cancelledBy: user.id,
     });
 
-    const refundDestination = 'your original payment source';
+    try {
+      const { notifyOrdersUpdated } = await import('@/lib/sync-events');
+      await notifyOrdersUpdated();
+    } catch {
+      // non-blocking
+    }
 
     return NextResponse.json({
       success: true,
-      message: `Order ${orderId} cancelled successfully and ₹${order.totalAmount} refunded to ${refundDestination}.`,
+      orderId: result.orderId,
+      paymentStatus: result.paymentStatus,
+      refundAmount: result.refundAmount,
+      message: result.message,
     });
   } catch (error: any) {
+    if (error instanceof OrderCancellationError) {
+      return NextResponse.json({ error: error.message }, { status: error.status });
+    }
     console.error('Error cancelling order:', error);
-    return NextResponse.json({ error: error?.message || 'Failed to cancel order' }, { status: 500 });
+    return NextResponse.json({ error: 'Failed to cancel order' }, { status: 500 });
   }
 }

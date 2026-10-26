@@ -189,9 +189,12 @@ export default function CartPage() {
       // If Cashfree Payment Gateway Session is returned, launch official Cashfree modal directly
       if (data.paymentSessionId) {
         try {
+          // The server reports which Cashfree environment created the session.
+          if (data.cashfreeMode !== 'production' && data.cashfreeMode !== 'sandbox') {
+            throw new Error('Payment gateway mode was not provided by the server');
+          }
           const CashfreeSDK = await loadCashfreeSdk();
-          const mode = process.env.NEXT_PUBLIC_CASHFREE_ENV === 'prod' ? 'production' : 'sandbox';
-          const cashfree = CashfreeSDK({ mode });
+          const cashfree = CashfreeSDK({ mode: data.cashfreeMode });
 
           cashfree
             .checkout({

@@ -1,10 +1,17 @@
 import { NextResponse } from 'next/server';
-import { db } from '@/lib/firebase-admin';
-import { cleanDoc, generateId } from '@/lib/firestore-db';
-import { createCashfreeOrder } from '@/lib/cashfree';
+import {
+  createCashfreeOrder,
+  getAppBaseUrl,
+  getCashfreeMode,
+  isCashfreeConfigured,
+  isMockPaymentAllowed,
+  PaymentConfigError,
+} from '@/lib/cashfree';
 import { savePendingTeacherOrder } from '@/lib/order-fulfillment';
+import { generateTeacherOrderId, resolveTeacherCart } from '@/lib/teacher-orders';
 import { getTodayString } from '@/lib/utils';
 import { checkRateLimit, getClientIp } from '@/lib/rate-limiter';
+import { getCurrentUser } from '@/lib/auth';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -24,84 +31,100 @@ export async function POST(req: Request) {
       );
     }
 
+    // DEF-02: Authentication and Role Authorization Guard
+    const user = await getCurrentUser(req);
+    if (!user) {
+      return NextResponse.json(
+        { error: 'Unauthorized: Authentication required. Please log in as staff or faculty to place teacher orders.' },
+        { status: 401 }
+      );
+    }
+
+    if (user.role !== 'STAFF' && user.role !== 'ADMIN') {
+      return NextResponse.json(
+        { error: 'Forbidden: Teacher meal ordering is restricted to school staff and faculty. Parents must order through the parent portal.' },
+        { status: 403 }
+      );
+    }
+
     const body = await req.json();
     const { teacherName, teacherPhone, notes, items } = body;
 
-    const cleanTeacherName = (teacherName || '').trim();
+    const cleanTeacherName = String(teacherName || user.name || '').trim();
     if (!cleanTeacherName) {
       return NextResponse.json({ error: 'Please enter your name to place the order' }, { status: 400 });
     }
 
-    if (!Array.isArray(items) || items.length === 0) {
-      return NextResponse.json({ error: 'Your cart is empty. Please select food items.' }, { status: 400 });
+    // DEF-01: Authoritative Server-Side Item Resolution & Price Calculation
+    // Never trust client-submitted prices, item names, or categories.
+    const cart = await resolveTeacherCart(items);
+    if (!cart.ok) {
+      return NextResponse.json({ error: cart.error }, { status: cart.status });
     }
-
-    // Validate and compute total
-    let totalAmount = 0;
-    const orderItems: any[] = [];
-
-    for (const item of items) {
-      const qty = parseInt(item.quantity, 10);
-      const price = parseFloat(item.price);
-      if (isNaN(qty) || qty <= 0 || isNaN(price) || price <= 0) {
-        return NextResponse.json({ error: 'Invalid items in cart' }, { status: 400 });
-      }
-
-      const itemTotal = Math.round(qty * price * 100) / 100;
-      totalAmount += itemTotal;
-
-      orderItems.push({
-        id: generateId('TCI-'),
-        mealId: item.mealId,
-        mealName: item.mealName,
-        category: item.category || 'LUNCH',
-        isVegetarian: Boolean(item.isVegetarian),
-        quantity: qty,
-        unitPrice: price,
-        totalPrice: itemTotal,
-      });
-    }
-
-    totalAmount = Math.round(totalAmount * 100) / 100;
+    const { items: orderItems, totalAmount } = cart;
 
     const todayStr = getTodayString();
-    // Unique order ID, e.g. TCH-629814
-    const uniqueSuffix = Math.floor(100000 + Math.random() * 900000);
-    const orderId = `TCH-${uniqueSuffix}`;
-
-    const appUrl = (process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000').replace(/\/$/, '');
-    const returnUrl = `${appUrl}/teacher/confirmation/${orderId}?cf_id={order_id}`;
+    const orderId = generateTeacherOrderId();
 
     // Clean phone
-    let phone = (teacherPhone || '').replace(/\D/g, '');
+    let phone = String(teacherPhone || '').replace(/\D/g, '');
     if (phone.length > 10) phone = phone.slice(-10);
     if (phone.length < 10) phone = '9999999999';
 
     // Create Cashfree session
     let paymentSessionId = '';
     let cfOrderId = '';
+    let cashfreeMode: string | null = null;
 
-    try {
-      const cfResponse = await createCashfreeOrder({
-        orderId,
-        orderAmount: totalAmount,
-        customer: {
-          customerId: `teacher_${cleanTeacherName.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase().slice(0, 30)}`,
-          customerName: cleanTeacherName,
-          customerEmail: 'teacher@schoolbite.in',
-          customerPhone: phone,
-        },
-        returnUrl,
-        orderNote: `Teacher Meal Order - ${cleanTeacherName}`,
-      });
+    if (isCashfreeConfigured()) {
+      let appUrl: string;
+      try {
+        cashfreeMode = getCashfreeMode();
+        appUrl = getAppBaseUrl();
+      } catch (configErr) {
+        if (configErr instanceof PaymentConfigError) {
+          console.error('[Payment Config Error in Teacher Order]:', configErr.message);
+          return NextResponse.json(
+            { error: 'Online payment gateway is temporarily unavailable. Please try again later.' },
+            { status: 503 }
+          );
+        }
+        throw configErr;
+      }
 
-      paymentSessionId = cfResponse.paymentSessionId;
-      cfOrderId = cfResponse.cfOrderId;
-    } catch (cfErr: any) {
-      console.error('[Cashfree Error in Teacher Order]:', cfErr.message || cfErr);
+      try {
+        const cfResponse = await createCashfreeOrder({
+          orderId,
+          orderAmount: totalAmount,
+          customer: {
+            customerId: `teacher_${user.id}`,
+            customerName: cleanTeacherName,
+            customerEmail: user.email || 'teacher@schoolbite.in',
+            customerPhone: phone,
+          },
+          returnUrl: `${appUrl}/teacher/confirmation/${orderId}?cf_id={order_id}`,
+          notifyUrl: `${appUrl}/api/webhooks/cashfree`,
+          orderNote: `Teacher Meal Order - ${cleanTeacherName}`,
+        });
+
+        paymentSessionId = cfResponse.paymentSessionId;
+        cfOrderId = cfResponse.cfOrderId;
+      } catch (cfErr: any) {
+        console.error('[Cashfree Error in Teacher Order]:', cfErr.message || cfErr);
+        return NextResponse.json(
+          { error: 'Payment gateway is currently unavailable. Please try again shortly.' },
+          { status: 502 }
+        );
+      }
+    } else if (isMockPaymentAllowed()) {
+      // Non-production test session only (strictly kept in pending_teacher_orders)
+      paymentSessionId = `mock_sess_${orderId}`;
+      cfOrderId = `mock_cf_${orderId}`;
+    } else {
+      console.error('[Payment Gateway Error]: Cashfree credentials are not configured.');
       return NextResponse.json(
-        { error: 'Payment gateway is currently unavailable. Please try again shortly.' },
-        { status: 502 }
+        { error: 'Online payment gateway is not configured.' },
+        { status: 503 }
       );
     }
 
@@ -110,6 +133,7 @@ export async function POST(req: Request) {
     await savePendingTeacherOrder({
       id: orderId,
       orderType: 'TEACHER',
+      userId: user.id,
       teacherName: cleanTeacherName,
       teacherPhone: phone,
       totalAmount,
@@ -117,7 +141,7 @@ export async function POST(req: Request) {
       paymentMethod: 'ONLINE',
       cashfreeOrderId: cfOrderId,
       paymentSessionId,
-      notes: notes?.trim() || null,
+      notes: typeof notes === 'string' ? notes.trim() || null : null,
       items: orderItems,
       createdAt: now,
       updatedAt: now,
@@ -127,6 +151,7 @@ export async function POST(req: Request) {
       success: true,
       orderId,
       paymentSessionId,
+      cashfreeMode,
       totalAmount,
     });
   } catch (error) {

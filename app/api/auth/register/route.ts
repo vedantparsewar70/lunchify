@@ -61,6 +61,17 @@ export async function POST(req: Request) {
       );
     }
 
+    // The configured admin/staff emails are reserved for the env-based bootstrap login.
+    const reservedEmails = [process.env.ADMIN_EMAIL, process.env.STAFF_EMAIL]
+      .map((e) => e?.trim().toLowerCase())
+      .filter(Boolean);
+    if (reservedEmails.includes(normalizedEmail)) {
+      return NextResponse.json(
+        { error: 'An account with this email already exists. Please sign in instead.' },
+        { status: 409 }
+      );
+    }
+
     // Check if user exists
     const existing = await prisma.user.findUnique({
       where: { email: normalizedEmail },

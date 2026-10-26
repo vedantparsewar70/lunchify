@@ -1,7 +1,7 @@
 export type UserRole = 'PARENT' | 'ADMIN' | 'STAFF';
 
 export type PaymentMethod = 'UPI' | 'CARD' | 'NET_BANKING';
-export type PaymentStatus = 'PENDING' | 'SUCCESS' | 'FAILED' | 'REFUNDED';
+export type PaymentStatus = 'PENDING' | 'SUCCESS' | 'FAILED' | 'REFUNDED' | 'REFUND_PENDING' | 'REFUND_FAILED';
 export type OrderStatus = 'CONFIRMED' | 'PREPARING' | 'READY' | 'COLLECTED' | 'CANCELLED';
 
 export interface UserSession {

@@ -144,7 +144,7 @@ async function verifyRealFlow() {
 
   // STEP E: Duplicate submission prevention check
   console.log('\n--- STEP E: Idempotency & Duplicate Order Prevention ---');
-  const duplicateFulfillment = await fulfillParentOrder(testOrderId);
+  const duplicateFulfillment = await fulfillParentOrder(testOrderId, { amount: totalAmount });
   console.log(`[Duplicate Check] Already fulfilled detected: ${duplicateFulfillment.alreadyFulfilled === true}`);
 
   // STEP F: Orders-to-History Flow Demonstration
