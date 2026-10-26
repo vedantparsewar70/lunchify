@@ -29,9 +29,9 @@ async function verifyFirebaseConnection() {
   } catch (error: any) {
     console.error('\n❌ Firebase connection check failed:');
     console.error(error?.message || error);
-    console.log('\n💡 Tip: Make sure you have downloaded your Service Account Key JSON from');
-    console.log('   Firebase Console -> Project Settings -> Service accounts -> Generate new private key');
-    console.log('   and saved it as "firebase-service-account.json" in the project root folder.\n');
+    console.log('\n💡 Tip: Set FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL and FIREBASE_PRIVATE_KEY');
+    console.log('   (or FIREBASE_SERVICE_ACCOUNT_KEY) in your environment, e.g. in .env, and run');
+    console.log('   this script with: npx tsx --env-file=.env scripts/verify-firebase.ts\n');
     process.exit(1);
   }
 }

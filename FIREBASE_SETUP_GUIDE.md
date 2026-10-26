@@ -39,30 +39,26 @@ This project is fully equipped to use **Google Cloud Firestore** as its database
 
 ---
 
-## 📁 Step 4: Place the Key in Your Project
+## 📁 Step 4: Configure Credentials via Environment Variables
 
-Choose **Option A** (Simplest) or **Option B**:
+Credentials are read **only** from environment variables. Do not place the downloaded
+`.json` file inside the project folder and never commit it. Copy its values into your
+local `.env` (git-ignored) and into your hosting provider's environment settings:
 
-### Option A: Replace the JSON file (Recommended)
-1. Open your project folder:
-   ```
-   c:\Users\Vaibhav\Downloads\projects\school-bite
-   ```
-2. Take the downloaded `.json` file, rename it to:
-   ```
-   firebase-service-account.json
-   ```
-3. Replace the existing placeholder [firebase-service-account.json](file:///c:/Users/Vaibhav/Downloads/projects/school-bite/firebase-service-account.json) file with your newly downloaded file.
-
----
-
-### Option B: Use `.env` Variables
-Alternatively, you can open your downloaded `.json` file and copy the values into [`.env`](file:///c:/Users/Vaibhav/Downloads/projects/school-bite/.env):
 ```env
 FIREBASE_PROJECT_ID="your-project-id"
 FIREBASE_CLIENT_EMAIL="firebase-adminsdk-xxxxx@your-project-id.iam.gserviceaccount.com"
 FIREBASE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
 ```
+
+`FIREBASE_PRIVATE_KEY` may contain real line breaks or literal `\n` sequences; both work.
+
+Alternatively, set `FIREBASE_SERVICE_ACCOUNT_KEY` to the full JSON contents (raw or base64-encoded).
+
+After copying the values, store the downloaded `.json` file outside the project or delete it.
+
+Scripts run with `tsx` do not load `.env` automatically. Pass it explicitly, e.g.
+`npx tsx --env-file=.env scripts/verify-firebase.ts`.
 
 ---
 

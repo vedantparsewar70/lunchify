@@ -34,7 +34,6 @@ ENV PATH="/app/node_modules/.bin:$PATH"
 COPY --from=builder /app/public ./public
 COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
-COPY --from=builder /app/firebase-service-account.json* ./
 
 # Copy Prisma schema and engines
 COPY --from=builder /app/prisma ./prisma

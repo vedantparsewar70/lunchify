@@ -30,8 +30,10 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
-# env files (can opt-in for committing if needed)
+# env files (only the placeholder template is committed)
 .env
+.env.*
+!.env.example
 
 # vercel
 .vercel
@@ -40,10 +42,14 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
-# Firebase Service Account
+# Firebase / Google Cloud service-account credentials
 *serviceAccount*.json
-firebase-service-account.json
+*service-account*.json
+*service_account*.json
+*firebase-adminsdk*.json
 firebase-admin-key.json
+*.p12
+*.key
 
 # Database Backups
 *backup*.json

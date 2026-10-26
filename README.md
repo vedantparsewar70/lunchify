@@ -69,7 +69,7 @@
    ```
 
 2. **Configure Firebase**:
-   Download your Firebase Service Account Private Key from **Firebase Console** -> **Project Settings** -> **Service accounts** and save it as `firebase-service-account.json` in the project root (or set `FIREBASE_PROJECT_ID`, `FIREBASE_CLIENT_EMAIL`, and `FIREBASE_PRIVATE_KEY` in `.env`).
+   Download your Firebase Service Account Private Key from **Firebase Console** -> **Project Settings** -> **Service accounts** and copy its values into `FIREBASE_PROJECT_ID`, `FIREBASE_CLIENT_EMAIL`, and `FIREBASE_PRIVATE_KEY` in `.env` (or set `FIREBASE_SERVICE_ACCOUNT_KEY` to the full JSON). Credentials are read only from environment variables; never commit the JSON file.
 
 3. **Seed demo Indian school meals and sample orders into Firestore**:
    ```bash
