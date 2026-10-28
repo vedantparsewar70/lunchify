@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getFirebaseConfigStatus, db } from '@/lib/firebase-admin';
+import { publicHealthPayload } from '@/lib/health';
 
 export const dynamic = 'force-dynamic';
 
@@ -7,30 +8,30 @@ export async function GET() {
   const configStatus = getFirebaseConfigStatus();
   let dbConnected = false;
   let dbError: string | null = null;
-  let userCount = 0;
 
   if (configStatus.configured) {
     try {
-      const snap = await db.collection('users').limit(1).get();
+      await db.collection('users').limit(1).get();
       dbConnected = true;
-      userCount = snap.size;
     } catch (err: any) {
       dbError = err?.message || String(err);
     }
   }
 
-  return NextResponse.json({
-    status: configStatus.configured && dbConnected ? 'HEALTHY' : 'MISCONFIGURED',
-    timestamp: new Date().toISOString(),
-    firebase: {
-      isConfigured: configStatus.configured,
-      isConnectedToDatabase: dbConnected,
-      databaseError: dbError,
+  if (!configStatus.configured || !dbConnected) {
+    // Details stay in the server logs (Vercel -> Logs); only booleans are public.
+    console.error('[Health] Unhealthy', {
       initializationError: configStatus.initError,
-    },
-    environment: configStatus.envStatus,
-    instructions: !configStatus.configured
-      ? 'In your Vercel Project Settings -> Environment Variables, add FIREBASE_SERVICE_ACCOUNT_KEY with your service account JSON and make sure "Production" and "Preview" environments are selected, then Redeploy.'
-      : undefined,
+      databaseError: dbError,
+      environment: configStatus.envStatus,
+    });
+  }
+
+  const payload = publicHealthPayload({
+    configured: configStatus.configured,
+    initError: configStatus.initError,
+    dbConnected,
+    dbError,
   });
+  return NextResponse.json(payload, { status: payload.status === 'HEALTHY' ? 200 : 503 });
 }

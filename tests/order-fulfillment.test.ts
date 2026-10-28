@@ -75,7 +75,36 @@ test('cart lines for the same menu are aggregated and cannot oversell', async ()
   assert.equal(result.reason, 'STOCK_UNAVAILABLE');
   assert.equal(fs.getDoc('menus', `menu_${DATE}_primary`)?.availableQuantity, 2, 'stock must not change or go negative');
   assert.equal(fs.getDoc('orders', 'ORD-B'), undefined);
-  assert.equal(fs.getDoc('pending_orders', 'ORD-B')?.status, 'NEEDS_REVIEW');
+  assert.equal(fs.getDoc('pending_orders', 'ORD-B')?.status, 'PAYMENT_EXCEPTION');
+  assert.equal(result.exceptionRecorded, true);
+});
+
+test('a paid but sold-out checkout is recorded durably and never fulfilled later', async () => {
+  const fs = new FakeFirestore();
+  seedMenus(fs, 1);
+  seedPending(fs, 'ORD-SO', [line('stu_1', 'meal_pulao', 'Primary', 2)], 120);
+  const db = fs.asFirestore();
+  const payment = { amount: 120, currency: 'INR', transactionRef: 'cf_pay_9', cashfreeOrderId: 'cf_9' };
+
+  const first = await fulfillParentOrder('ORD-SO', payment, db);
+  assert.equal(first.reason, 'STOCK_UNAVAILABLE');
+
+  const exception = fs.getDoc('payment_exceptions', 'ORD-SO');
+  assert.equal(exception?.reason, 'STOCK_UNAVAILABLE');
+  assert.equal(exception?.paidAmount, 120);
+  assert.equal(exception?.transactionRef, 'cf_pay_9');
+  assert.equal(exception?.cashfreeOrderId, 'cf_9');
+  assert.equal(exception?.refundState, 'NOT_REQUESTED');
+  assert.equal(exception?.ownerId, 'par_1');
+  assert.deepEqual(exception?.items.map((i: any) => i.quantity), [2]);
+
+  // Stock frees up (e.g. a cancellation); a webhook retry must still not create the order,
+  // because the payment is being refunded.
+  fs.seed('menus', `menu_${DATE}_primary`, { ...fs.getDoc('menus', `menu_${DATE}_primary`), availableQuantity: 10 });
+  const retry = await fulfillParentOrder('ORD-SO', payment, db);
+  assert.equal(retry.success, false);
+  assert.equal(fs.getDoc('orders', 'ORD-SO'), undefined);
+  assert.equal(fs.getDoc('menus', `menu_${DATE}_primary`)?.availableQuantity, 10);
 });
 
 test('paid amount or currency that does not match the pending total is rejected', async () => {
@@ -90,6 +119,8 @@ test('paid amount or currency that does not match the pending total is rejected'
     assert.equal(result.reason, 'AMOUNT_MISMATCH');
     assert.equal(fs.getDoc('orders', 'ORD-C'), undefined);
     assert.equal(fs.getDoc('menus', `menu_${DATE}_primary`)?.availableQuantity, 50);
+    // Recorded for an admin decision; never refunded automatically
+    assert.equal(fs.getDoc('payment_exceptions', 'ORD-C')?.refundState, 'MANUAL_REVIEW');
   }
   assert.equal(checkPaidAmount({ amount: 120 }, 120), null);
 });
@@ -131,13 +162,16 @@ test('a late payment event never revives a cancelled order', async () => {
 
 test('teacher fulfilment is idempotent and checks the amount', async () => {
   const fs = new FakeFirestore();
-  fs.seed('pending_teacher_orders', 'TCH-1', {
-    id: 'TCH-1', orderType: 'TEACHER', userId: 'usr_staff', teacherName: 'T', totalAmount: 140, date: DATE, items: [], createdAt: 'x', updatedAt: 'x',
+  const pendingTeacher = (id: string) => ({
+    id, orderType: 'TEACHER', userId: 'usr_staff', teacherName: 'T', totalAmount: 140, date: DATE, items: [], createdAt: 'x', updatedAt: 'x',
   });
+  fs.seed('pending_teacher_orders', 'TCH-0', pendingTeacher('TCH-0'));
+  fs.seed('pending_teacher_orders', 'TCH-1', pendingTeacher('TCH-1'));
   const db = fs.asFirestore();
 
-  assert.equal((await fulfillTeacherOrder('TCH-1', { amount: 1, currency: 'INR' }, db)).reason, 'AMOUNT_MISMATCH');
-  assert.equal(fs.getDoc('teacher_orders', 'TCH-1'), undefined);
+  assert.equal((await fulfillTeacherOrder('TCH-0', { amount: 1, currency: 'INR' }, db)).reason, 'AMOUNT_MISMATCH');
+  assert.equal(fs.getDoc('teacher_orders', 'TCH-0'), undefined);
+  assert.equal(fs.getDoc('payment_exceptions', 'TCH-0')?.orderType, 'TEACHER');
 
   const [a, b] = await Promise.all([
     fulfillTeacherOrder('TCH-1', { amount: 140, currency: 'INR' }, db),

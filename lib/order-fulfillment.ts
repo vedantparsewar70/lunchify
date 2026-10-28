@@ -3,6 +3,7 @@ import type { Firestore } from 'firebase-admin/firestore';
 import { db } from './firebase-admin';
 import { cleanDoc, generateId } from './firestore-db';
 import { collectMenuStockInTransaction } from './menu-stock';
+import { PAYMENT_EXCEPTIONS, recordPaymentException } from './payment-exceptions';
 
 export interface PendingParentOrder {
   id: string;
@@ -57,6 +58,8 @@ export interface FulfillmentResult {
   alreadyFulfilled?: boolean;
   reason?: 'AMOUNT_MISMATCH' | 'STOCK_UNAVAILABLE' | 'ORDER_NOT_PAYABLE';
   message?: string;
+  /** A payment exception exists for this order (see lib/payment-exceptions.ts). */
+  exceptionRecorded?: boolean;
 }
 
 /**
@@ -127,10 +130,13 @@ export async function fulfillParentOrder(
   const orderRef = firestore.collection('orders').doc(orderId);
   const pendingRef = firestore.collection('pending_orders').doc(orderId);
 
+  const exceptionRef = firestore.collection(PAYMENT_EXCEPTIONS).doc(orderId);
+
   const result = await firestore.runTransaction(async (transaction): Promise<FulfillmentResult> => {
     // --- Reads ---
     const existingOrderSnap = await transaction.get(orderRef);
     const pendingSnap = await transaction.get(pendingRef);
+    const exceptionSnap = await transaction.get(exceptionRef);
 
     if (existingOrderSnap.exists) {
       const existingData = existingOrderSnap.data() || {};
@@ -162,16 +168,21 @@ export async function fulfillParentOrder(
     const pending = pendingSnap.data() as PendingParentOrder;
     const cartItems = pending.cartItems || [];
 
+    // A recorded payment exception is final: retries must never create the order afterwards
+    // (the payment may already be refunded).
+    if (exceptionSnap.exists) {
+      const exception = exceptionSnap.data() || {};
+      return { success: false, orderId, reason: exception.reason, message: 'Payment exception already recorded', exceptionRecorded: true };
+    }
+
     const mismatch = checkPaidAmount(payment, pending.totalAmount);
     if (mismatch) {
-      // Returns immediately after this write, so no read follows it.
-      transaction.update(pendingRef, {
-        status: 'NEEDS_REVIEW',
-        reviewReason: 'AMOUNT_MISMATCH',
-        paidAmount: Number(payment.amount) || 0,
-        updatedAt: now,
+      // Returns immediately after these writes, so no read follows them.
+      recordPaymentException(transaction, exceptionRef, pendingRef, {
+        orderId, orderType: 'PARENT', ownerId: pending.parentId, reason: 'AMOUNT_MISMATCH', detail: mismatch,
+        expectedAmount: pending.totalAmount, payment, cashfreeOrderId: pending.cashfreeOrderId, items: cartItems, now,
       });
-      return { success: false, orderId, reason: 'AMOUNT_MISMATCH', message: mismatch };
+      return { success: false, orderId, reason: 'AMOUNT_MISMATCH', message: mismatch, exceptionRecorded: true };
     }
 
     const menuStock = await collectMenuStockInTransaction(
@@ -191,19 +202,18 @@ export async function fulfillParentOrder(
       menuStock.unresolved.length > 0 || menuStock.stock.some((s) => s.available < s.required);
     if (insufficient) {
       // Payment was captured but the meals can no longer be supplied. Never oversell or go negative;
-      // keep the checkout for canteen review and refund.
-      transaction.update(pendingRef, {
-        status: 'NEEDS_REVIEW',
-        reviewReason: 'STOCK_UNAVAILABLE',
-        paidAmount: Number(payment.amount) || 0,
-        cashfreeOrderId: payment.cashfreeOrderId || pending.cashfreeOrderId || null,
-        updatedAt: now,
+      // record a durable exception so the payment is refunded (see refundPaymentException).
+      recordPaymentException(transaction, exceptionRef, pendingRef, {
+        orderId, orderType: 'PARENT', ownerId: pending.parentId, reason: 'STOCK_UNAVAILABLE',
+        detail: 'One or more meals sold out before the paid order could be confirmed',
+        expectedAmount: pending.totalAmount, payment, cashfreeOrderId: pending.cashfreeOrderId, items: cartItems, now,
       });
       return {
         success: false,
         orderId,
         reason: 'STOCK_UNAVAILABLE',
-        message: 'Payment received, but one or more meals are no longer available. The order needs canteen review for a refund.',
+        message: 'Payment received, but one or more meals are no longer available.',
+        exceptionRecorded: true,
       };
     }
 
@@ -292,10 +302,12 @@ export async function fulfillTeacherOrder(
   const now = new Date().toISOString();
   const orderRef = firestore.collection('teacher_orders').doc(orderId);
   const pendingRef = firestore.collection('pending_teacher_orders').doc(orderId);
+  const exceptionRef = firestore.collection(PAYMENT_EXCEPTIONS).doc(orderId);
 
   const result = await firestore.runTransaction(async (transaction): Promise<FulfillmentResult> => {
     const existingOrderSnap = await transaction.get(orderRef);
     const pendingSnap = await transaction.get(pendingRef);
+    const exceptionSnap = await transaction.get(exceptionRef);
 
     if (existingOrderSnap.exists) {
       const existingData = existingOrderSnap.data() || {};
@@ -324,15 +336,18 @@ export async function fulfillTeacherOrder(
 
     const pending = pendingSnap.data() as PendingTeacherOrder;
 
+    if (exceptionSnap.exists) {
+      const exception = exceptionSnap.data() || {};
+      return { success: false, orderId, reason: exception.reason, message: 'Payment exception already recorded', exceptionRecorded: true };
+    }
+
     const mismatch = checkPaidAmount(payment, pending.totalAmount);
     if (mismatch) {
-      transaction.update(pendingRef, {
-        status: 'NEEDS_REVIEW',
-        reviewReason: 'AMOUNT_MISMATCH',
-        paidAmount: Number(payment.amount) || 0,
-        updatedAt: now,
+      recordPaymentException(transaction, exceptionRef, pendingRef, {
+        orderId, orderType: 'TEACHER', ownerId: pending.userId || null, reason: 'AMOUNT_MISMATCH', detail: mismatch,
+        expectedAmount: pending.totalAmount, payment, cashfreeOrderId: pending.cashfreeOrderId, items: pending.items || [], now,
       });
-      return { success: false, orderId, reason: 'AMOUNT_MISMATCH', message: mismatch };
+      return { success: false, orderId, reason: 'AMOUNT_MISMATCH', message: mismatch, exceptionRecorded: true };
     }
 
     const orderDoc = cleanDoc({

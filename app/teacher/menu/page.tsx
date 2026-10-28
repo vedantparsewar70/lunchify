@@ -25,6 +25,7 @@ import VegBadge from '@/components/VegBadge';
 import { formatINR, formatDatePretty, getTodayString } from '@/lib/utils';
 import { useToast } from '@/components/ToastContext';
 import { useAuth } from '@/components/AuthContext';
+import { INVALID_PHONE_MESSAGE, normalizeIndianMobile, TEACHER_PHONE_REQUIRED_MESSAGE } from '@/lib/phone';
 import { loadCashfreeSdk } from '@/lib/cashfree-client';
 import { useSyncWatcher } from '@/lib/client-sync';
 
@@ -155,6 +156,14 @@ export default function TeacherMenuPage() {
 
     if (totalItemsCount === 0) {
       setErrorMessage('Your cart is empty. Please select food items.');
+      return;
+    }
+
+    // The payment gateway needs the payer's own mobile number: the one typed here,
+    // otherwise the number saved on the account (the server checks this again).
+    const typedPhone = teacherPhone.trim();
+    if (typedPhone ? !normalizeIndianMobile(typedPhone) : !normalizeIndianMobile(user?.phone)) {
+      setErrorMessage(typedPhone ? INVALID_PHONE_MESSAGE : TEACHER_PHONE_REQUIRED_MESSAGE);
       return;
     }
 
@@ -549,7 +558,7 @@ export default function TeacherMenuPage() {
 
                 <div>
                   <label className="block text-xs font-black text-slate-700 mb-1">
-                    Mobile Number (for payment updates)
+                    Mobile Number (required for payment)
                   </label>
                   <input
                     type="tel"

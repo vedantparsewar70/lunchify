@@ -3,6 +3,7 @@ import { cookies } from 'next/headers';
 import prisma from '@/lib/prisma';
 import { hashPassword, createSessionToken, TOKEN_COOKIE_NAME } from '@/lib/auth';
 import { checkRateLimit, getClientIp } from '@/lib/rate-limiter';
+import { INVALID_PHONE_MESSAGE, normalizeIndianMobile } from '@/lib/phone';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -61,6 +62,12 @@ export async function POST(req: Request) {
       );
     }
 
+    // Required: Cashfree needs the payer's own mobile number at checkout.
+    const normalizedPhone = normalizeIndianMobile(phone);
+    if (!normalizedPhone) {
+      return NextResponse.json({ error: INVALID_PHONE_MESSAGE }, { status: 400 });
+    }
+
     // The configured admin/staff emails are reserved for the env-based bootstrap login.
     const reservedEmails = [process.env.ADMIN_EMAIL, process.env.STAFF_EMAIL]
       .map((e) => e?.trim().toLowerCase())
@@ -91,7 +98,7 @@ export async function POST(req: Request) {
       data: {
         name: name.trim(),
         email: normalizedEmail,
-        phone: phone ? phone.trim() : null,
+        phone: normalizedPhone,
         passwordHash,
         role: 'PARENT',
         parent: {

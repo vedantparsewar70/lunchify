@@ -16,7 +16,7 @@ export interface RefundClient {
   get(orderId: string, refundId: string): Promise<CashfreeRefund>;
 }
 
-const cashfreeRefunds: RefundClient = {
+export const cashfreeRefunds: RefundClient = {
   create: createCashfreeRefund,
   get: getCashfreeRefund,
 };
@@ -49,14 +49,18 @@ export interface CancelOrderResult {
 
 /** Stable per order, so a repeated refund request can never create a second refund. */
 export function refundIdForOrder(orderId: string): string {
-  return `RF-${crypto.createHash('sha256').update(orderId).digest('hex').slice(0, 24)}`;
+  // Cashfree documents refund_id as alphanumeric (3-40 chars), so no separators.
+  return `RF${crypto.createHash('sha256').update(orderId).digest('hex').slice(0, 24)}`;
 }
 
-/** Only SUCCESS is a completed refund and only CANCELLED a definite failure; anything else is still in progress. */
+/**
+ * Only SUCCESS is a completed refund; CANCELLED and REJECTED are definite failures; anything
+ * else (PENDING, PENDING_APPROVAL, ONHOLD, unknown) is still in progress.
+ */
 export function paymentStatusForRefund(refundStatus: string): RefundPaymentStatus {
   const status = String(refundStatus).toUpperCase();
   if (status === 'SUCCESS') return 'REFUNDED';
-  if (status === 'CANCELLED') return 'REFUND_FAILED';
+  if (status === 'CANCELLED' || status === 'REJECTED') return 'REFUND_FAILED';
   return 'REFUND_PENDING';
 }
 
@@ -73,7 +77,11 @@ function refundMessage(paymentStatus: string, amount: number): string {
   return 'Order cancelled.';
 }
 
-async function requestRefund(
+/**
+ * Requests a refund once (same refund_id on every call) and reads back the existing refund
+ * when the gateway rejects a duplicate. Never reports REFUNDED unless the gateway says SUCCESS.
+ */
+export async function requestRefund(
   order: Record<string, any>,
   orderId: string,
   refundId: string,
@@ -84,19 +92,47 @@ async function requestRefund(
     return { paymentStatus: 'REFUNDED', refundStatus: 'MOCK_SUCCESS', cfRefundId: null, error: null };
   }
 
+  const fromRefund = (refund: CashfreeRefund) => ({
+    paymentStatus: paymentStatusForRefund(refund.status),
+    refundStatus: refund.status,
+    cfRefundId: refund.cfRefundId,
+    error: null,
+  });
+  // We cannot tell whether a refund exists (timeout, network error, 429/5xx, or a lookup rejected
+  // with 400/401/403). Never call it failed or done, and never create on that basis: the next
+  // attempt looks it up again first.
+  const unresolved = (err: any) => {
+    const error = String(err?.message || 'Refund state unknown').slice(0, 200);
+    const refundStatus = err?.ambiguous ? 'UNKNOWN' : 'LOOKUP_FAILED';
+    console.error(`[Refund] Refund state unresolved (${refundStatus}) for order ${orderId}: ${error}`);
+    return { paymentStatus: 'REFUND_PENDING' as const, refundStatus, cfRefundId: null, error };
+  };
+  const isNotFound = (err: any) => err?.status === 404;
+
+  // 1. Look up first. Only Cashfree's documented 404 "Resource Not found" proves no refund
+  //    with this ID exists, so only then is a create attempted.
   try {
-    const refund = await refunds.create({ orderId, refundId, amount });
-    return { paymentStatus: paymentStatusForRefund(refund.status), refundStatus: refund.status, cfRefundId: refund.cfRefundId, error: null };
+    return fromRefund(await refunds.get(orderId, refundId));
+  } catch (lookupErr: any) {
+    if (!isNotFound(lookupErr)) return unresolved(lookupErr);
+  }
+
+  // 2. Create. The idempotency key makes a retried create replay instead of refunding twice.
+  try {
+    return fromRefund(await refunds.create({ orderId, refundId, amount }));
   } catch (createErr: any) {
-    // A retry reuses the same refund_id, which the gateway rejects as a duplicate: read back the existing refund.
+    // Timeout/network/429/5xx: it may have been created. Resolve on the next attempt's lookup.
+    if (createErr?.ambiguous) return unresolved(createErr);
+    // Rejected (e.g. 409 because a concurrent attempt created it, or 400/401/422): check again.
     try {
-      const refund = await refunds.get(orderId, refundId);
-      return { paymentStatus: paymentStatusForRefund(refund.status), refundStatus: refund.status, cfRefundId: refund.cfRefundId, error: null };
-    } catch {
-      const error = String(createErr?.message || 'Refund request failed').slice(0, 200);
-      console.error(`[Refund] Refund request failed for order ${orderId}: ${error}`);
-      return { paymentStatus: 'REFUND_FAILED', refundStatus: 'ERROR', cfRefundId: null, error };
+      return fromRefund(await refunds.get(orderId, refundId));
+    } catch (recheckErr: any) {
+      if (!isNotFound(recheckErr)) return unresolved(recheckErr);
     }
+    // Rejected and confirmed absent: this request definitely did not create a refund.
+    const error = String(createErr?.message || 'Refund request failed').slice(0, 200);
+    console.error(`[Refund] Refund request rejected for order ${orderId}: ${error}`);
+    return { paymentStatus: 'REFUND_FAILED', refundStatus: 'ERROR', cfRefundId: null, error };
   }
 }
 

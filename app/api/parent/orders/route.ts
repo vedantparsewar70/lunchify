@@ -15,9 +15,10 @@ import {
   isMockPaymentAllowed,
   PaymentConfigError,
 } from '@/lib/cashfree';
-import { BUSINESS_CONFIG } from '@/lib/business-config';
+import { normalizeIndianMobile } from '@/lib/phone';
 import { savePendingParentOrder, fulfillParentOrder, generateParentOrderId } from '@/lib/order-fulfillment';
 import { cancelOrderWithRefund, OrderCancellationError } from '@/lib/order-cancellation';
+import { refundPaymentException } from '@/lib/payment-exceptions';
 import { validateCartAvailability } from '@/lib/availability';
 
 export const runtime = 'nodejs';
@@ -171,6 +172,18 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
     const parentId = user.parentId;
+
+    // The payment gateway needs the payer's own mobile number; never substitute another one.
+    const customerPhone = normalizeIndianMobile(user.phone);
+    if (!customerPhone) {
+      return NextResponse.json(
+        {
+          error: 'Please add a valid 10-digit mobile number to your profile before paying. It is required by the payment gateway.',
+          code: 'PHONE_REQUIRED',
+        },
+        { status: 400 }
+      );
+    }
 
     // Rate Limiting: 30 checkout submissions per minute per parent
     const clientIp = getClientIp(req);
@@ -529,7 +542,7 @@ export async function POST(req: Request) {
             customerId: parentRecord.id,
             customerName: user.name || 'Parent',
             customerEmail: user.email || 'parent@schoolbite.in',
-            customerPhone: user.phone || BUSINESS_CONFIG.supportPhone.replace(/\D/g, ''),
+            customerPhone,
           },
           returnUrl: `${originUrl}/parent/confirmation/${orderId}?order_id={order_id}`,
           notifyUrl: `${originUrl}/api/webhooks/cashfree`,
@@ -613,6 +626,9 @@ export async function POST(req: Request) {
     });
 
     if (!fulfillRes.success) {
+      if (fulfillRes.reason === 'STOCK_UNAVAILABLE' && fulfillRes.exceptionRecorded) {
+        await refundPaymentException(orderId);
+      }
       return NextResponse.json({ error: fulfillRes.message || 'Order could not be confirmed' }, { status: 409 });
     }
 

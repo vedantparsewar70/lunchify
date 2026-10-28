@@ -34,6 +34,7 @@ export default function CartPage() {
   const [notes, setNotes] = useState('');
   const [processing, setProcessing] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
+  const [phoneRequired, setPhoneRequired] = useState(false);
 
   // Live availability tracking: Map of `${mealId}__${date}` -> reason
   const [unavailableItemsMap, setUnavailableItemsMap] = useState<Record<string, string>>({});
@@ -153,6 +154,7 @@ export default function CartPage() {
     }
 
     setErrorMessage('');
+    setPhoneRequired(false);
     setProcessing(true);
 
     try {
@@ -174,6 +176,7 @@ export default function CartPage() {
       if (!res.ok) {
         const errorText = data.error || 'Unable to create order. Please try again.';
         setErrorMessage(errorText);
+        setPhoneRequired(data.code === 'PHONE_REQUIRED');
         if (data.unavailableItem) {
           const key = `${data.unavailableItem.mealId}__${data.unavailableItem.date}`;
           setUnavailableItemsMap((prev) => ({
@@ -485,7 +488,14 @@ export default function CartPage() {
             {errorMessage && (
               <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl flex items-start gap-2.5 text-rose-700 text-xs">
                 <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-                <span className="leading-relaxed font-medium">{errorMessage}</span>
+                <span className="leading-relaxed font-medium">
+                  {errorMessage}
+                  {phoneRequired && (
+                    <Link href="/parent/profile#phone" className="block mt-1.5 font-bold underline text-rose-800">
+                      Add mobile number →
+                    </Link>
+                  )}
+                </span>
               </div>
             )}
 

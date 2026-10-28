@@ -2,6 +2,7 @@ import './helpers/isolate-env';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { FakeFirestore } from './helpers/fake-firestore';
+import { CashfreeApiError } from '../lib/cashfree';
 import {
   applyRefundStatus,
   cancelOrderWithRefund,
@@ -33,7 +34,7 @@ function refundClient(outcomes: Array<'SUCCESS' | 'PENDING' | 'CANCELLED' | Erro
       return { refundId: params.refundId, cfRefundId: 'cf_rf_1', status: outcome, amount: params.amount };
     },
     async get(_orderId, refundId) {
-      if (!getOutcome || getOutcome instanceof Error) throw getOutcome || new Error('refund not found');
+      if (!getOutcome || getOutcome instanceof Error) throw getOutcome || new CashfreeApiError('refund not found', 404, false);
       return { refundId, cfRefundId: 'cf_rf_1', status: getOutcome, amount: 120 };
     },
   };

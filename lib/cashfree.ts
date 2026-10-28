@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import { normalizeIndianMobile } from './phone';
 
 /**
  * Cashfree Payment Gateway Service (Zero-external-dependency, native fetch)
@@ -114,10 +115,11 @@ function getCredentials() {
 export async function createCashfreeOrder(params: CreateOrderParams): Promise<CashfreeOrderResponse> {
   const { appId, secretKey, apiVersion, baseUrl } = getCredentials();
 
-  // Clean and normalize phone to 10 digits for Indian standard
-  let cleanPhone = params.customer.customerPhone ? params.customer.customerPhone.replace(/\D/g, '') : '';
-  if (cleanPhone.length > 10) cleanPhone = cleanPhone.slice(-10);
-  if (cleanPhone.length < 10) cleanPhone = '9999999999';
+  // Cashfree requires the customer's phone; callers must supply a real one (no substitution here).
+  const cleanPhone = normalizeIndianMobile(params.customer.customerPhone);
+  if (!cleanPhone) {
+    throw new Error('A valid 10-digit customer mobile number is required to create a payment.');
+  }
 
   // Customer ID must be alphanumeric and under 50 characters
   const cleanCustomerId = params.customer.customerId.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 50) || 'cust_anonymous';
@@ -290,8 +292,57 @@ function mapRefund(data: any): CashfreeRefund {
 }
 
 /**
- * Requests a refund for a paid order. refundId must be stable per order so repeated
- * requests cannot create a second refund.
+ * Error from a Cashfree API call.
+ * - ambiguous: outcome unknown or transient (timeout, network error, HTTP 429 or 5xx); the
+ *   request may or may not have taken effect, so callers must not assume either.
+ * - notFound: HTTP 404, Cashfree's documented "Resource Not found" response.
+ * Anything else (400, 401, 403, 409, 422) is a definite rejection of this request, which says
+ * nothing about whether the resource exists.
+ */
+export class CashfreeApiError extends Error {
+  status: number | null;
+  ambiguous: boolean;
+  constructor(message: string, status: number | null, ambiguous: boolean) {
+    super(message);
+    this.name = 'CashfreeApiError';
+    this.status = status;
+    this.ambiguous = ambiguous;
+  }
+  get notFound(): boolean {
+    return this.status === 404;
+  }
+}
+
+const REFUND_API_TIMEOUT_MS = 15000;
+
+/**
+ * Stable UUID-format idempotency key per refund. Cashfree replays the original response for a
+ * retried request with the same key and body, so a retry after a timeout cannot act twice.
+ */
+export function refundIdempotencyKey(refundId: string): string {
+  const h = crypto.createHash('sha256').update(`schoolbite-refund:${refundId}`).digest('hex');
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-5${h.slice(13, 16)}-a${h.slice(17, 20)}-${h.slice(20, 32)}`;
+}
+
+async function refundApiCall(url: string, init: RequestInit, failure: string): Promise<any> {
+  let res: Response;
+  try {
+    res = await fetch(url, { ...init, signal: AbortSignal.timeout(REFUND_API_TIMEOUT_MS) });
+  } catch (err: any) {
+    throw new CashfreeApiError(`${failure}: ${err?.name === 'TimeoutError' ? 'timed out' : 'network error'}`, null, true);
+  }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const transient = res.status === 429 || res.status >= 500;
+    throw new CashfreeApiError(data.message || `${failure} with HTTP ${res.status}`, res.status, transient);
+  }
+  return data;
+}
+
+/**
+ * Requests a refund for a paid order. Send the same refundId and amount on every attempt:
+ * the idempotency key is derived from the refundId, and Cashfree rejects a key reused with
+ * a different body.
  */
 export async function createCashfreeRefund(params: {
   orderId: string;
@@ -301,33 +352,54 @@ export async function createCashfreeRefund(params: {
 }): Promise<CashfreeRefund> {
   const { appId, secretKey, apiVersion, baseUrl } = getCredentials();
 
-  const res = await fetch(`${baseUrl}/orders/${encodeURIComponent(params.orderId)}/refunds`, {
-    method: 'POST',
-    headers: {
-      'x-client-id': appId,
-      'x-client-secret': secretKey,
-      'x-api-version': apiVersion,
-      'Content-Type': 'application/json',
-      'Accept': 'application/json',
+  const data = await refundApiCall(
+    `${baseUrl}/orders/${encodeURIComponent(params.orderId)}/refunds`,
+    {
+      method: 'POST',
+      headers: {
+        'x-client-id': appId,
+        'x-client-secret': secretKey,
+        'x-api-version': apiVersion,
+        'x-idempotency-key': refundIdempotencyKey(params.refundId),
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+      },
+      body: JSON.stringify({
+        refund_amount: Math.round(params.amount * 100) / 100,
+        refund_id: params.refundId,
+        refund_note: (params.note || 'SchoolBite order cancellation').slice(0, 100),
+      }),
     },
-    body: JSON.stringify({
-      refund_amount: Math.round(params.amount * 100) / 100,
-      refund_id: params.refundId,
-      refund_note: (params.note || 'SchoolBite order cancellation').slice(0, 100),
-    }),
-  });
-
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    throw new Error(data.message || `Cashfree refund request failed with HTTP ${res.status}`);
-  }
+    'Cashfree refund request failed'
+  );
   return mapRefund(data);
 }
 
 export async function getCashfreeRefund(orderId: string, refundId: string): Promise<CashfreeRefund> {
   const { appId, secretKey, apiVersion, baseUrl } = getCredentials();
 
-  const res = await fetch(`${baseUrl}/orders/${encodeURIComponent(orderId)}/refunds/${encodeURIComponent(refundId)}`, {
+  const data = await refundApiCall(
+    `${baseUrl}/orders/${encodeURIComponent(orderId)}/refunds/${encodeURIComponent(refundId)}`,
+    {
+      method: 'GET',
+      headers: {
+        'x-client-id': appId,
+        'x-client-secret': secretKey,
+        'x-api-version': apiVersion,
+        'Accept': 'application/json',
+      },
+      cache: 'no-store',
+    },
+    'Failed to fetch Cashfree refund status'
+  );
+  return mapRefund(data);
+}
+
+/** All refunds Cashfree holds for an order (read-only). */
+export async function getCashfreeOrderRefunds(orderId: string): Promise<CashfreeRefund[]> {
+  const { appId, secretKey, apiVersion, baseUrl } = getCredentials();
+
+  const res = await fetch(`${baseUrl}/orders/${encodeURIComponent(orderId)}/refunds`, {
     method: 'GET',
     headers: {
       'x-client-id': appId,
@@ -338,11 +410,11 @@ export async function getCashfreeRefund(orderId: string, refundId: string): Prom
     cache: 'no-store',
   });
 
-  const data = await res.json().catch(() => ({}));
+  const data = await res.json().catch(() => []);
   if (!res.ok) {
-    throw new Error(data.message || `Failed to fetch Cashfree refund status: ${res.status}`);
+    throw new Error((data as any)?.message || `Failed to fetch Cashfree refunds: ${res.status}`);
   }
-  return mapRefund(data);
+  return Array.isArray(data) ? data.map(mapRefund) : [];
 }
 
 /**

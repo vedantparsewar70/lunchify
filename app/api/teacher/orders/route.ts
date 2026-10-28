@@ -9,6 +9,7 @@ import {
 } from '@/lib/cashfree';
 import { savePendingTeacherOrder } from '@/lib/order-fulfillment';
 import { generateTeacherOrderId, resolveTeacherCart } from '@/lib/teacher-orders';
+import { resolveCheckoutPhone } from '@/lib/phone';
 import { getTodayString } from '@/lib/utils';
 import { checkRateLimit, getClientIp } from '@/lib/rate-limiter';
 import { getCurrentUser } from '@/lib/auth';
@@ -66,10 +67,13 @@ export async function POST(req: Request) {
     const todayStr = getTodayString();
     const orderId = generateTeacherOrderId();
 
-    // Clean phone
-    let phone = String(teacherPhone || '').replace(/\D/g, '');
-    if (phone.length > 10) phone = phone.slice(-10);
-    if (phone.length < 10) phone = '9999999999';
+    // The payer's own mobile number is required by the payment gateway: the number typed at
+    // checkout, otherwise the one saved on the staff account. Nothing is substituted or saved.
+    const phoneCheck = resolveCheckoutPhone(teacherPhone, user.phone);
+    if (!phoneCheck.ok) {
+      return NextResponse.json({ error: phoneCheck.error, code: phoneCheck.code }, { status: 400 });
+    }
+    const phone = phoneCheck.phone;
 
     // Create Cashfree session
     let paymentSessionId = '';

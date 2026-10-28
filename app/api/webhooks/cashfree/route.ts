@@ -8,6 +8,7 @@ import {
 import { db } from '@/lib/firebase-admin';
 import { fulfillParentOrder, fulfillTeacherOrder } from '@/lib/order-fulfillment';
 import { applyRefundStatus } from '@/lib/order-cancellation';
+import { applyExceptionRefundStatus, refundPaymentException } from '@/lib/payment-exceptions';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -43,9 +44,13 @@ export async function POST(req: Request) {
     if (eventType.startsWith('REFUND')) {
       const refundObj = payload.data?.refund || {};
       if (refundObj.order_id && refundObj.refund_id) {
-        const refund = await getCashfreeRefund(String(refundObj.order_id), String(refundObj.refund_id));
-        const status = await applyRefundStatus(String(refundObj.order_id), refund);
-        console.log(`[Cashfree Webhook] Refund for order ${refundObj.order_id} is now ${status}`);
+        const refundOrderId = String(refundObj.order_id);
+        const refund = await getCashfreeRefund(refundOrderId, String(refundObj.refund_id));
+        // The refund belongs either to a cancelled order or to an unfulfillable payment; each
+        // update only applies when the stored refund ID matches.
+        const status = await applyRefundStatus(refundOrderId, refund);
+        const exceptionStatus = await applyExceptionRefundStatus(refundOrderId, refund);
+        console.log(`[Cashfree Webhook] Refund for ${refundOrderId}: order=${status} exception=${exceptionStatus}`);
       }
       return NextResponse.json({ success: true, received: true });
     }
@@ -79,8 +84,12 @@ export async function POST(req: Request) {
       : await fulfillParentOrder(orderId, details);
 
     if (!result.success) {
-      // Recorded for canteen review; acknowledge so the gateway does not keep retrying.
-      console.error(`[Cashfree Webhook] Order ${orderId} needs review: ${result.reason} - ${result.message}`);
+      // Recorded as a payment exception; acknowledge so the gateway does not keep retrying.
+      console.error(`[Cashfree Webhook] Order ${orderId} not fulfilled: ${result.reason} - ${result.message}`);
+      if (result.reason === 'STOCK_UNAVAILABLE' && result.exceptionRecorded) {
+        const refund = await refundPaymentException(orderId);
+        console.log(`[Cashfree Webhook] Unfulfillable payment ${orderId}: refund ${refund.refundState}`);
+      }
     } else if (!result.alreadyFulfilled) {
       console.log(`[Cashfree Webhook] Order ${orderId} confirmed via webhook.`);
     }

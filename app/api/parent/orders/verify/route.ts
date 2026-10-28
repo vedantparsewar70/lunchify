@@ -3,6 +3,7 @@ import { getCurrentUser } from '@/lib/auth';
 import { db } from '@/lib/firebase-admin';
 import { getVerifiedCashfreePayment, paymentDetailsFromCashfree } from '@/lib/cashfree';
 import { fulfillParentOrder } from '@/lib/order-fulfillment';
+import { refundPaymentException } from '@/lib/payment-exceptions';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -59,16 +60,17 @@ export async function POST(req: Request) {
 
       if (!result.success) {
         console.error(`[Payment Review] Order ${orderId}: ${result.reason} - ${result.message}`);
-        return NextResponse.json(
-          {
-            error:
-              result.reason === 'STOCK_UNAVAILABLE'
-                ? 'Payment received, but a meal in your order sold out before it could be confirmed. The canteen will review your order and arrange a refund.'
-                : 'Payment received but the order could not be confirmed automatically. The canteen will review it.',
-            reason: result.reason,
-          },
-          { status: 409 }
-        );
+        let error = 'Payment received but the order could not be confirmed automatically. The canteen will review it.';
+        if (result.reason === 'STOCK_UNAVAILABLE' && result.exceptionRecorded) {
+          const refund = await refundPaymentException(orderId);
+          error =
+            refund.refundState === 'REFUNDED'
+              ? `A meal in your order sold out before payment completed, so no order was created. ₹${refund.refundAmount} has been refunded to your original payment method.`
+              : refund.refundState === 'REFUND_PENDING'
+              ? `A meal in your order sold out before payment completed, so no order was created. A full refund of ₹${refund.refundAmount} has been initiated to your original payment method.`
+              : 'A meal in your order sold out before payment completed, so no order was created. The canteen will arrange your refund; please contact the school canteen if you have questions.';
+        }
+        return NextResponse.json({ error, reason: result.reason }, { status: 409 });
       }
 
       return NextResponse.json({
