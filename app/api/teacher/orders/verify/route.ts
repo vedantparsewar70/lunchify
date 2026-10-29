@@ -3,21 +3,22 @@ import { db } from '@/lib/firebase-admin';
 import { getCurrentUser } from '@/lib/auth';
 import { getVerifiedCashfreePayment, paymentDetailsFromCashfree } from '@/lib/cashfree';
 import { fulfillTeacherOrder } from '@/lib/order-fulfillment';
-import { canAccessTeacherOrder } from '@/lib/teacher-orders';
+import { canAccessTeacherOrderRequest, isValidTeacherOrderId, readGuestToken } from '@/lib/teacher-orders';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 export async function POST(req: Request) {
   try {
-    const user = await getCurrentUser(req);
-    if (!user) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    const { orderId } = await req.json().catch(() => ({}));
+    if (!isValidTeacherOrderId(orderId)) {
+      return NextResponse.json({ error: 'orderId is required' }, { status: 400 });
     }
 
-    const { orderId } = await req.json().catch(() => ({}));
-    if (!orderId || typeof orderId !== 'string') {
-      return NextResponse.json({ error: 'orderId is required' }, { status: 400 });
+    // Staff/admin session, or the guest cookie issued when this order was placed.
+    const user = await getCurrentUser(req);
+    if (!user && !readGuestToken(req, orderId)) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
     // 1. Existing orders: report their actual state, never re-fulfil
@@ -26,7 +27,7 @@ export async function POST(req: Request) {
     const pendingSnap = await db.collection('pending_teacher_orders').doc(orderId).get();
     const record = orderSnap.exists ? orderSnap.data() || {} : pendingSnap.exists ? pendingSnap.data() || {} : null;
 
-    if (!record || !canAccessTeacherOrder(user, record)) {
+    if (!record || !(await canAccessTeacherOrderRequest(user, record, orderId, req))) {
       return NextResponse.json({ error: 'Teacher order session not found' }, { status: 404 });
     }
 

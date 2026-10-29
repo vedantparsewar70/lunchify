@@ -47,7 +47,7 @@ interface CartEntry {
 export default function TeacherMenuPage() {
   const router = useRouter();
   const { showToast } = useToast();
-  const { user, isLoading: authLoading } = useAuth();
+  const { user } = useAuth();
   const todayDateStr = getTodayString();
 
   const [meals, setMeals] = useState<TeacherMeal[]>([]);
@@ -331,21 +331,6 @@ export default function TeacherMenuPage() {
               className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-xl font-bold text-xs shrink-0 transition-colors"
             >
               Go to Parent Menu →
-            </Link>
-          </div>
-        )}
-
-        {!user && !authLoading && (
-          <div className="p-3.5 bg-slate-50 border border-slate-200 text-slate-800 text-xs rounded-2xl flex items-center justify-between gap-3 animate-in fade-in">
-            <div className="flex items-center gap-2">
-              <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0" />
-              <span>Staff or Faculty credentials required to place teacher orders.</span>
-            </div>
-            <Link
-              href="/login?role=staff"
-              className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold text-xs shrink-0 transition-colors"
-            >
-              Sign In as Staff →
             </Link>
           </div>
         )}

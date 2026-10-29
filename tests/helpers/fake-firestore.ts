@@ -126,6 +126,9 @@ class FakeQuery {
     if (op !== '==') throw new Error(`FakeFirestore only supports '==' filters (got ${op})`);
     return new FakeQuery(this.store, this.collectionName, [...this.filters, [field, value]]);
   }
+  limit(_count: number) {
+    return this;
+  }
   async get() {
     const docs = this.store
       .docsOf(this.collectionName)

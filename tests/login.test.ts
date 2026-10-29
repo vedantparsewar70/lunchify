@@ -69,7 +69,7 @@ function teacherOrderRequest(token?: string) {
       'x-forwarded-for': `10.1.0.${++ipCounter}`,
       ...(token ? { authorization: `Bearer ${token}` } : {}),
     },
-    body: JSON.stringify({ teacherName: 'T', items: [] }),
+    body: JSON.stringify({ teacherName: 'Teacher', items: [] }),
   });
 }
 
@@ -125,7 +125,7 @@ test('a stored staff account logs in with its password; staff and admin logins s
   assert.deepEqual(writes, []);
 });
 
-test('the staff session from login is accepted by the teacher-order API; others are rejected', async () => {
+test('the staff session from login is accepted by the teacher-order API; parents are rejected', async () => {
   await seedUser('usr_s', 'staff@school.com', 'STAFF', 'staff-secret-1');
   await seedUser('usr_p', 'parent@example.com', 'PARENT', 'parent-secret-1');
   const staffToken = sessionToken(await login(loginRequest({ email: 'staff@school.com', password: 'staff-secret-1', requestedRole: 'staff' })));
@@ -137,9 +137,7 @@ test('the staff session from login is accepted by the teacher-order API; others 
   assert.match((await staff.json()).error, /cart is empty/);
 
   assert.equal((await placeTeacherOrder(teacherOrderRequest(parentToken))).status, 403);
-  assert.equal((await placeTeacherOrder(teacherOrderRequest())).status, 401);
-  assert.equal((await placeTeacherOrder(teacherOrderRequest('forged.token.value'))).status, 401);
-
-  delete users.usr_s; // a deleted staff account loses access immediately
-  assert.equal((await placeTeacherOrder(teacherOrderRequest(staffToken))).status, 401);
+  // Without a valid session the request is a guest teacher order (see teacher-guest-orders.test.ts).
+  assert.equal((await placeTeacherOrder(teacherOrderRequest())).status, 400);
+  assert.equal((await placeTeacherOrder(teacherOrderRequest('forged.token.value'))).status, 400);
 });

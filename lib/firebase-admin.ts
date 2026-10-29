@@ -177,6 +177,14 @@ export const db: Firestore = new Proxy({} as Firestore, {
   },
 });
 
+/** Test seam: runs route handlers against an in-memory Firestore. Refused outside NODE_ENV=test. */
+export function setFirestoreForTesting(firestore: Firestore | null): void {
+  if (process.env.NODE_ENV !== 'test') {
+    throw new Error('setFirestoreForTesting is only available when NODE_ENV=test');
+  }
+  cachedDb = firestore;
+}
+
 export function getFirebaseConfigStatus() {
   let configured = false;
   try {
