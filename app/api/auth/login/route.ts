@@ -74,8 +74,17 @@ export async function POST(req: Request) {
         where: { email: emailStr },
         include: { parent: true },
       });
-    } catch {
-      // Prisma fallback handles missing connection
+    } catch (lookupError) {
+      // A failed lookup is not "no such user": reporting it as invalid credentials hides database
+      // outages, and auto-provisioning below could overwrite an account that does exist.
+      console.error(
+        '[AUTH_LOGIN_ERROR] User lookup failed:',
+        lookupError instanceof Error ? lookupError.name : 'UnknownError'
+      );
+      return NextResponse.json(
+        { error: 'Login is temporarily unavailable. Please try again shortly.' },
+        { status: 503, headers: { 'Cache-Control': 'no-store' } }
+      );
     }
 
     // Auto-provision or sync admin account if env matches.
