@@ -58,11 +58,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         if (res.ok) {
           const data = await res.json();
           setUser(data.user || null);
-        } else {
+        } else if (res.status === 401 || res.status === 403) {
+          // Only an explicit "not signed in" ends the session in the UI.
           setUser(null);
         }
+        // A temporary server or network problem (5xx) keeps the current user, so a parent is not
+        // thrown back to the login page in the middle of checkout.
       } catch {
-        setUser(null);
+        // Network error: keep the current state.
       } finally {
         setIsLoading(false);
         inFlightRefreshPromise = null;

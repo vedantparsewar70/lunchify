@@ -2,20 +2,27 @@ import { NextResponse } from 'next/server';
 import prisma from '@/lib/prisma';
 import { getCurrentUser } from '@/lib/auth';
 
-import { ensureTomorrowMenuReset } from '@/lib/menu-schedule';
-import { getOffsetDateString, APP_TIMEZONE } from '@/lib/utils';
 import { getStudentCategory } from '@/lib/october-2026-timetable';
+
+/** Portions must be whole numbers from 0 to 10,000; anything else is rejected, never stored as NaN. */
+function invalidQuantity(...values: unknown[]): boolean {
+  return values.some((v) => {
+    if (v === undefined || v === null) return false;
+    const n = Number(v);
+    return v === '' || !Number.isInteger(n) || n < 0 || n > 10000;
+  });
+}
 
 export async function GET(req: Request) {
   try {
+    const user = await getCurrentUser(req);
+    if (!user || (user.role !== 'ADMIN' && user.role !== 'STAFF')) {
+      return NextResponse.json({ error: 'Unauthorized: Admin or Staff access required' }, { status: 403 });
+    }
+
     const { searchParams } = new URL(req.url);
     const date = searchParams.get('date');
     const category = searchParams.get('category') || searchParams.get('studentCategory');
-    const tomorrowStr = getOffsetDateString(1, APP_TIMEZONE);
-
-    if (!date || date === tomorrowStr) {
-      await ensureTomorrowMenuReset(tomorrowStr);
-    }
 
     let whereClause: any = date ? { date } : {};
     if (category && category !== 'ALL') {
@@ -38,19 +45,23 @@ export async function GET(req: Request) {
 
 export async function POST(req: Request) {
   try {
-    const user = await getCurrentUser();
+    const user = await getCurrentUser(req);
     if (!user || (user.role !== 'ADMIN' && user.role !== 'STAFF')) {
       return NextResponse.json({ error: 'Unauthorized: Admin or Staff access required' }, { status: 403 });
     }
 
     const body = await req.json();
-    const { mealId, date, availableQuantity = 50, maxQuantity = 50, orderingDeadline = '08:30' } = body;
+    const { mealId, date, availableQuantity, maxQuantity, orderingDeadline = '08:30' } = body;
 
     if (!mealId || !date) {
       return NextResponse.json({ error: 'Meal ID and date are required' }, { status: 400 });
     }
+    if (invalidQuantity(availableQuantity, maxQuantity)) {
+      return NextResponse.json({ error: 'Quantity must be a whole number between 0 and 10000' }, { status: 400 });
+    }
 
-    // Upsert menu item for this meal & date
+    // Upsert menu item for this meal & date. Re-scheduling an existing menu keeps its remaining
+    // stock (already reduced by orders) unless a quantity is explicitly supplied.
     const menu = await prisma.menu.upsert({
       where: {
         mealId_date: {
@@ -59,16 +70,16 @@ export async function POST(req: Request) {
         },
       },
       update: {
-        availableQuantity: Number(availableQuantity),
-        maxQuantity: Number(maxQuantity),
+        ...(availableQuantity !== undefined ? { availableQuantity: Number(availableQuantity) } : {}),
+        ...(maxQuantity !== undefined ? { maxQuantity: Number(maxQuantity) } : {}),
         orderingDeadline: orderingDeadline || '08:30',
         isActive: true,
       },
       create: {
         mealId,
         date,
-        availableQuantity: Number(availableQuantity),
-        maxQuantity: Number(maxQuantity),
+        availableQuantity: Number(availableQuantity ?? 50),
+        maxQuantity: Number(maxQuantity ?? 50),
         orderingDeadline: orderingDeadline || '08:30',
         isActive: true,
       },
@@ -171,7 +182,7 @@ async function handleBatchPublish(date: string, selectedMealIds: string[]) {
 
 export async function PUT(req: Request) {
   try {
-    const user = await getCurrentUser();
+    const user = await getCurrentUser(req);
     if (!user || (user.role !== 'ADMIN' && user.role !== 'STAFF')) {
       return NextResponse.json({ error: 'Unauthorized: Admin or Staff access required' }, { status: 403 });
     }
@@ -179,13 +190,19 @@ export async function PUT(req: Request) {
     const body = await req.json();
     const { id, availableQuantity, maxQuantity, orderingDeadline, isActive, date, selectedMealIds } = body;
 
-    // Handle batch publishing for a given date
+    // Handle batch publishing for a given date (admin only, as in PATCH)
     if (date && Array.isArray(selectedMealIds)) {
+      if (user.role !== 'ADMIN') {
+        return NextResponse.json({ error: 'Unauthorized: Admin access required' }, { status: 403 });
+      }
       return await handleBatchPublish(date, selectedMealIds);
     }
 
     if (!id) {
       return NextResponse.json({ error: 'Menu ID is required' }, { status: 400 });
+    }
+    if (invalidQuantity(availableQuantity, maxQuantity)) {
+      return NextResponse.json({ error: 'Quantity must be a whole number between 0 and 10000' }, { status: 400 });
     }
 
     const updated = await prisma.menu.update({
@@ -215,7 +232,7 @@ export async function PUT(req: Request) {
 
 export async function DELETE(req: Request) {
   try {
-    const user = await getCurrentUser();
+    const user = await getCurrentUser(req);
     if (!user || (user.role !== 'ADMIN' && user.role !== 'STAFF')) {
       return NextResponse.json({ error: 'Unauthorized: Admin or Staff access required' }, { status: 403 });
     }
@@ -245,7 +262,7 @@ export async function DELETE(req: Request) {
 
 export async function PATCH(req: Request) {
   try {
-    const user = await getCurrentUser();
+    const user = await getCurrentUser(req);
     if (!user || user.role !== 'ADMIN') {
       return NextResponse.json({ error: 'Unauthorized: Admin access required' }, { status: 403 });
     }

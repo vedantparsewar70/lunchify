@@ -237,7 +237,7 @@ function KitchenPageContent() {
 
             {/* Clean summary table for printing */}
             {kitchenData?.mealCounts && kitchenData.mealCounts.length > 0 && (
-              <div className="border-t border-slate-200 px-4 sm:px-6 py-4">
+              <div className="border-t border-slate-200 px-4 sm:px-6 py-4 overflow-x-auto">
                 <table className="w-full text-left text-xs">
                   <thead className="text-[10px] font-bold text-slate-400 uppercase border-b border-slate-200">
                     <tr>

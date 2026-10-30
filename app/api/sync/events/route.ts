@@ -17,18 +17,8 @@ export async function GET() {
     });
   } catch (error) {
     console.error('Error fetching sync versions:', error);
-    return NextResponse.json(
-      {
-        menuVersion: Date.now(),
-        ordersVersion: Date.now(),
-        teacherOrdersVersion: Date.now(),
-        timestamp: Date.now(),
-      },
-      {
-        headers: {
-          'Cache-Control': 'no-store, max-age=0',
-        },
-      }
-    );
+    // Never invent new versions on failure: that would make every open page refetch everything
+    // exactly when the database is struggling. Clients simply try again on their next poll.
+    return NextResponse.json({ error: 'Sync temporarily unavailable' }, { status: 503, headers: { 'Cache-Control': 'no-store, max-age=0' } });
   }
 }

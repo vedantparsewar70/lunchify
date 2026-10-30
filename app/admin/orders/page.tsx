@@ -62,7 +62,13 @@ function AdminOrdersContent() {
       const ordRes = await fetch(`/api/admin/orders?${params.toString()}`);
       if (ordRes.ok) {
         const data = await ordRes.json();
-        setOrders(data.orders || []);
+        // With a date selected, each order shows (and changes) that day's status only.
+        setOrders(
+          (data.orders || []).map((o: { serviceStatus?: string | null; orderStatus?: string }) => ({
+            ...o,
+            orderStatus: (dateFilter && o.serviceStatus) || o.orderStatus,
+          }))
+        );
       }
     } catch (err) {
       console.error('Failed to fetch orders:', err);
@@ -85,20 +91,28 @@ function AdminOrdersContent() {
       const res = await fetch('/api/admin/orders', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ orderId, orderStatus: newStatus }),
+        // Preparation and handover are per day; the selected date says which day.
+        body: JSON.stringify({ orderId, orderStatus: newStatus, ...(dateFilter && newStatus !== 'CANCELLED' ? { date: dateFilter } : {}) }),
       });
 
+      const data = await res.json().catch(() => ({}));
       if (res.ok) {
-        showToast(`Order status updated to ${newStatus}`, 'success');
+        // For a cancellation, show the real refund outcome (requested, pending or failed).
+        const paymentStatus = data?.order?.paymentStatus;
+        showToast(
+          data?.message || `Order status updated to ${newStatus}`,
+          paymentStatus === 'REFUND_FAILED' ? 'error' : 'success'
+        );
         // Update local state immediately
         setOrders((prev) =>
-          prev.map((o) => (o.id === orderId ? { ...o, orderStatus: newStatus } : o))
+          prev.map((o) => (o.id === orderId ? { ...o, orderStatus: newStatus, ...(paymentStatus ? { paymentStatus } : {}) } : o))
         );
         if (detailOrder && detailOrder.id === orderId) {
-          setDetailOrder((prev: any) => ({ ...prev, orderStatus: newStatus }));
+          setDetailOrder((prev: any) => ({ ...prev, orderStatus: newStatus, ...(paymentStatus ? { paymentStatus } : {}) }));
         }
+        fetchOrders();
       } else {
-        showToast('Failed to update status', 'error');
+        showToast(data?.error || 'Failed to update status', 'error');
       }
     } catch {
       showToast('Network error updating status', 'error');
@@ -384,6 +398,9 @@ function AdminOrdersContent() {
                 <div className="px-4 py-2.5 bg-white border-t border-slate-100 flex flex-wrap items-center justify-between gap-2 text-xs">
                   <span className="text-slate-400 font-semibold text-[11px]">
                     Status: <strong className="text-slate-700">{o.orderStatus}</strong>
+                    {o.isMultiDate && !dateFilter && (
+                      <span className="block text-amber-700">Several days: pick a date above to update one day</span>
+                    )}
                   </span>
 
                   <div className="flex items-center gap-1.5 overflow-x-auto py-0.5">
@@ -476,9 +493,14 @@ function AdminOrdersContent() {
                 <div className="space-y-1.5">
                   {detailOrder.items?.map((it: any, i: number) => (
                     <div key={i} className="flex items-center justify-between bg-white p-2.5 rounded-xl border border-slate-200">
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-2 min-w-0">
                         <VegBadge isVegetarian={it.isVegetarian} size="sm" />
                         <span className="font-bold text-slate-900">{it.mealName}</span>
+                        {it.date && (
+                          <span className="text-[11px] text-slate-500 whitespace-nowrap">
+                            {formatDatePretty(it.date)} · {it.serviceStatus === 'COLLECTED' ? 'Given' : it.serviceStatus || ''}
+                          </span>
+                        )}
                       </div>
                       <div className="flex items-center gap-3">
                         <span className="font-extrabold text-amber-600 bg-amber-50 px-2 py-0.5 rounded-md">

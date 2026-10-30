@@ -236,6 +236,12 @@ export default function TeacherMenuPage() {
                 showToast('Payment successful! Your order has been placed.', 'success');
                 router.push(`/teacher/confirmation/${orderId}`);
               }
+            })
+            .catch(() => {
+              // The payment window failed: let the teacher check the order status instead of paying again.
+              setErrorMessage('The payment window closed unexpectedly. If you paid, open the confirmation page before trying again.');
+              setSubmitting(false);
+              router.push(`/teacher/confirmation/${orderId}`);
             });
           return;
         } catch (sdkErr: any) {

@@ -40,6 +40,8 @@ export interface MenuStock {
   menuId: string;
   available: number;
   required: number;
+  /** Scheduling fields of the menu document, for service-date checks at payment time. */
+  menu: { date?: string; isActive?: boolean; isHoliday?: boolean; orderingDeadline?: string };
 }
 
 /**
@@ -102,6 +104,12 @@ export async function collectMenuStockInTransaction(
       menuId: hit.ref.id,
       available: Number(hit.data.availableQuantity ?? 0),
       required: 0,
+      menu: {
+        date: hit.data.date || line.date,
+        isActive: hit.data.isActive,
+        isHoliday: Boolean(hit.data.isHoliday),
+        orderingDeadline: hit.data.orderingDeadline,
+      },
     };
     entry.required += Math.max(0, Number(line.quantity) || 0);
     byPath.set(hit.ref.path, entry);

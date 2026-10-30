@@ -3,6 +3,7 @@ import prisma from '@/lib/prisma';
 import { getCurrentUser } from '@/lib/auth';
 import { getTodayString } from '@/lib/utils';
 import { db } from '@/lib/firebase-admin';
+import { applyServiceStatus, orderServiceDates, serviceStatusFor } from '@/lib/service-dates';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -12,7 +13,7 @@ const KITCHEN_CACHE_TTL = 10000;
 
 export async function GET(req: Request) {
   try {
-    const user = await getCurrentUser();
+    const user = await getCurrentUser(req);
     if (!user || (user.role !== 'ADMIN' && user.role !== 'STAFF')) {
       return NextResponse.json({ error: 'Unauthorized: Admin or Staff access required' }, { status: 403 });
     }
@@ -165,7 +166,7 @@ export async function GET(req: Request) {
         category: it.meal.category,
         isVegetarian: it.meal.isVegetarian,
         quantity: it.quantity,
-        orderStatus: it.order?.orderStatus || 'CONFIRMED',
+        orderStatus: it.order ? serviceStatusFor(it.order, date) : 'CONFIRMED',
       };
     });
 
@@ -174,9 +175,30 @@ export async function GET(req: Request) {
       .map(({ orderIds, ...rest }) => rest)
       .sort((a, b) => b.count - a.count || b.orderCount - a.orderCount);
 
+    // Paid teacher orders for the date, kept separate from the student counts above so existing
+    // screens are unchanged, but the kitchen can see the full amount to prepare.
+    const teacherSnap = await db.collection('teacher_orders').where('date', '==', date).get();
+    const teacherMealsMap = new Map<string, { mealName: string; quantity: number }>();
+    let teacherOrderCount = 0;
+    for (const doc of teacherSnap.docs) {
+      const order = doc.data();
+      if (order.paymentStatus !== 'PAID' || order.orderStatus === 'CANCELLED') continue;
+      teacherOrderCount += 1;
+      for (const item of order.items || []) {
+        const key = String(item.mealId || item.mealName || 'meal');
+        const entry = teacherMealsMap.get(key) || { mealName: item.mealName || 'Meal', quantity: 0 };
+        entry.quantity += Number(item.quantity) || 1;
+        teacherMealsMap.set(key, entry);
+      }
+    }
+    const teacherMeals = Array.from(teacherMealsMap.values()).sort((a, b) => b.quantity - a.quantity);
+
     const payload = {
       date,
       totalOrders: uniqueOrderIds.size,
+      teacherOrderCount,
+      teacherMealsTotal: teacherMeals.reduce((sum, m) => sum + m.quantity, 0),
+      teacherMeals,
       totalMeals,
       allergyAlertsCount,
       mealCounts: mealCountsList,
@@ -202,7 +224,7 @@ export async function GET(req: Request) {
 export async function PATCH(req: Request) {
   try {
     kitchenCache.clear();
-    const user = await getCurrentUser();
+    const user = await getCurrentUser(req);
     if (!user || (user.role !== 'ADMIN' && user.role !== 'STAFF')) {
       return NextResponse.json({ error: 'Unauthorized: Admin or Staff access required' }, { status: 403 });
     }
@@ -219,56 +241,54 @@ export async function PATCH(req: Request) {
       return NextResponse.json({ error: 'Invalid kitchen status' }, { status: 400 });
     }
 
-    let affectedCount = 0;
-
-    if (orderIds && orderIds.length > 0) {
-      // Fetch these orders to filter out CANCELLED and already COLLECTED orders
-      const orderDocs = await Promise.all(orderIds.map((id) => db.collection('orders').doc(id).get()));
-      const validIds: string[] = [];
-
-      for (const d of orderDocs) {
-        if (!d.exists) continue;
-        const ord = d.data();
-        if (!ord) continue;
-        // Never override terminal orders
-        if (ord.orderStatus === 'CANCELLED' || ord.orderStatus === 'COLLECTED') continue;
-        validIds.push(d.id);
-      }
-
-      if (validIds.length > 0) {
-        const res = await prisma.order.updateMany({
-          where: { id: { in: validIds } },
-          data: { orderStatus: status },
-        });
-        affectedCount = res.count;
-      }
+    let candidateIds: string[] = [];
+    if (Array.isArray(orderIds) && orderIds.length > 0) {
+      candidateIds = orderIds.filter((id) => typeof id === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(id));
     } else if (date) {
       const items = await prisma.orderItem.findMany({
-        where: {
-          date,
-          order: { orderStatus: { not: 'CANCELLED' } },
-        },
+        where: { date },
         select: { orderId: true },
       });
+      candidateIds = items.map((i) => i.orderId);
+    }
 
-      const uniqueOrderIds = Array.from(new Set(items.map((i) => i.orderId)));
-      const orderDocs = await Promise.all(uniqueOrderIds.map((id) => db.collection('orders').doc(id).get()));
-      const validIds = orderDocs
-        .filter((d) => d.exists && d.data()?.orderStatus !== 'CANCELLED' && d.data()?.orderStatus !== 'COLLECTED')
-        .map((d) => d.id);
-
-      if (validIds.length > 0) {
-        const res = await prisma.order.updateMany({
-          where: { id: { in: validIds } },
-          data: { orderStatus: status },
-        });
-        affectedCount = res.count;
+    // Each order is re-read and updated in its own transaction, so a cancellation or refund that
+    // lands at the same moment is never overwritten, and only paid, active orders move forward.
+    // Only the given service date changes; without a date, multi-date orders are skipped.
+    let affectedCount = 0;
+    let skippedCount = 0;
+    const now = new Date().toISOString();
+    for (const id of Array.from(new Set(candidateIds))) {
+      const updated = await db.runTransaction(async (transaction) => {
+        const ref = db.collection('orders').doc(id);
+        const snap = await transaction.get(ref);
+        const ord = snap.data();
+        if (!snap.exists || !ord) return false;
+        const itemsSnap = await transaction.get(db.collection('orderItems').where('orderId', '==', id));
+        const dates = orderServiceDates(itemsSnap.docs.map((d) => d.data()));
+        if (ord.paymentStatus !== 'PAID' || ord.orderStatus === 'CANCELLED') return false;
+        if (date ? !dates.includes(date) : dates.length !== 1) return false;
+        const serviceDate = date || dates[0];
+        if (serviceStatusFor(ord, serviceDate) === 'COLLECTED') return false;
+        transaction.update(ref, { ...applyServiceStatus(ord, dates, serviceDate, status, user.id, now) });
+        return true;
+      });
+      if (updated) affectedCount++;
+      else skippedCount++;
+    }
+    if (affectedCount > 0) {
+      try {
+        const { notifyOrdersUpdated } = await import('@/lib/sync-events');
+        await notifyOrdersUpdated();
+      } catch {
+        // non-blocking
       }
     }
 
     return NextResponse.json({
       success: true,
       message: `Updated ${affectedCount} orders to ${status}`,
+      skipped: skippedCount,
     });
   } catch (error) {
     console.error('Error updating kitchen orders:', error);

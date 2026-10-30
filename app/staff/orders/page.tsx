@@ -25,6 +25,9 @@ import { formatDatePretty, getTodayString, getOffsetDateString, formatINR } from
 import { useToast } from '@/components/ToastContext';
 import { useSyncWatcher, broadcastSyncEvent } from '@/lib/client-sync';
 
+/** The fields used to show one day of an order (the API returns more). */
+type DayOrder = { serviceStatus?: string | null; orderStatus?: string; items?: Array<{ date?: string }> };
+
 function StaffOrdersContent() {
   const todayDateStr = getTodayString();
   const tomorrowDateStr = getOffsetDateString(1);
@@ -50,7 +53,18 @@ function StaffOrdersContent() {
   const [loadingKitchen, setLoadingKitchen] = useState(false);
 
   const [search, setSearch] = useState('');
-  const [updatingId, setUpdatingId] = useState<string | null>(null);
+  // Orders with a handover in flight; one entry per order, so another card's reply never
+  // re-enables this card's button early.
+  const [updatingIds, setUpdatingIds] = useState<Set<string>>(new Set());
+  const setUpdating = (orderId: string, busy: boolean) =>
+    setUpdatingIds((prev) => {
+      const next = new Set(prev);
+      if (busy) next.add(orderId);
+      else next.delete(orderId);
+      return next;
+    });
+  // A failed load must not look like "no orders today".
+  const [loadError, setLoadError] = useState('');
 
   // Fetch kitchen production summaries for today and tomorrow
   const fetchKitchenSummary = async (bypassCache = false) => {
@@ -76,9 +90,6 @@ function StaffOrdersContent() {
     }
   };
 
-  useEffect(() => {
-    fetchKitchenSummary();
-  }, []);
 
   // Fetch student orders (active non-collected only)
   const fetchOrders = async () => {
@@ -91,7 +102,13 @@ function StaffOrdersContent() {
       const res = await fetch(`/api/admin/orders?${params.toString()}`, { cache: 'no-store' });
       if (res.ok) {
         const data = await res.json();
-        const allOrders = data.orders || [];
+        // Status and items for today only: a multi-day order shows just today's meal here,
+        // and giving it never marks the other days as given.
+        const allOrders = (data.orders || []).map((o: DayOrder) => ({
+          ...o,
+          orderStatus: o.serviceStatus || o.orderStatus,
+          items: (o.items || []).filter((it) => !it.date || it.date === todayDateStr),
+        }));
         // Only active orders remain in this section until staff clicks 'Given'
         const activeOrders = allOrders.filter(
           (o: any) => o.orderStatus !== 'COLLECTED' && o.orderStatus !== 'CANCELLED'
@@ -99,9 +116,14 @@ function StaffOrdersContent() {
         const givenCount = allOrders.filter((o: any) => o.orderStatus === 'COLLECTED').length;
         setOrders(activeOrders);
         setHistoryStudentCount(givenCount);
+        setLoadError('');
+      } else {
+        const data = await res.json().catch(() => ({}));
+        setLoadError(data.error || `Could not load orders (error ${res.status}).`);
       }
     } catch (err) {
       console.error('Failed to load student orders:', err);
+      setLoadError('Could not load orders. Check the connection.');
     } finally {
       setLoading(false);
     }
@@ -128,9 +150,14 @@ function StaffOrdersContent() {
         ).length;
         setTeacherOrders(activeTeachers);
         setHistoryTeacherCount(givenCount);
+        setLoadError('');
+      } else {
+        const data = await res.json().catch(() => ({}));
+        setLoadError(data.error || `Could not load teacher orders (error ${res.status}).`);
       }
     } catch (err) {
       console.error('Failed to load teacher orders:', err);
+      setLoadError('Could not load teacher orders. Check the connection.');
     } finally {
       setLoadingTeachers(false);
     }
@@ -156,8 +183,8 @@ function StaffOrdersContent() {
   useSyncWatcher({
     onOrdersUpdate: () => {
       fetchOrders();
-      fetchTeacherOrders();
-      fetchKitchenSummary(true);
+      // The production summary is only visible in its modal, which reloads it when opened.
+      if (showTotalOrdersModal) fetchKitchenSummary(true);
     },
     onTeacherOrdersUpdate: () => {
       fetchTeacherOrders();
@@ -165,12 +192,13 @@ function StaffOrdersContent() {
   });
 
   const handleMarkCollected = async (orderId: string) => {
-    setUpdatingId(orderId);
+    if (updatingIds.has(orderId)) return;
+    setUpdating(orderId, true);
     try {
       const res = await fetch('/api/admin/orders', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ orderId, orderStatus: 'COLLECTED' }),
+        body: JSON.stringify({ orderId, orderStatus: 'COLLECTED', date: todayDateStr }),
       });
 
       if (res.ok) {
@@ -179,19 +207,21 @@ function StaffOrdersContent() {
         setOrders((prev) => prev.filter((o) => o.id !== orderId));
         setHistoryStudentCount((c) => c + 1);
         broadcastSyncEvent('ORDERS_UPDATED');
-        fetchKitchenSummary(true);
       } else {
-        showToast('Failed to update order status', 'error');
+        const data = await res.json().catch(() => ({}));
+        showToast(data.error || 'Failed to update order status', 'error');
+        fetchOrders();
       }
     } catch {
       showToast('Network error updating status', 'error');
     } finally {
-      setUpdatingId(null);
+      setUpdating(orderId, false);
     }
   };
 
   const handleMarkTeacherGiven = async (orderId: string) => {
-    setUpdatingId(orderId);
+    if (updatingIds.has(orderId)) return;
+    setUpdating(orderId, true);
     try {
       const res = await fetch('/api/staff/teacher-orders', {
         method: 'PATCH',
@@ -205,14 +235,16 @@ function StaffOrdersContent() {
         setTeacherOrders((prev) => prev.filter((o) => o.id !== orderId));
         setHistoryTeacherCount((c) => c + 1);
         broadcastSyncEvent('TEACHER_ORDERS_UPDATED');
-        broadcastSyncEvent('ORDERS_UPDATED');
       } else {
-        showToast('Failed to update teacher order', 'error');
+        // e.g. already given on another device: show why and refresh the list.
+        const data = await res.json().catch(() => ({}));
+        showToast(data.error || 'Failed to update teacher order', 'error');
+        fetchTeacherOrders();
       }
     } catch {
       showToast('Network error updating status', 'error');
     } finally {
-      setUpdatingId(null);
+      setUpdating(orderId, false);
     }
   };
 
@@ -343,6 +375,19 @@ function StaffOrdersContent() {
         />
       </div>
 
+      {loadError && (
+        <div className="p-3 bg-rose-50 border border-rose-200 rounded-2xl flex flex-wrap items-center justify-between gap-2 text-rose-800 text-xs font-bold">
+          <span>{loadError} The list below may be out of date.</span>
+          <button
+            type="button"
+            onClick={() => (activeTab === 'STUDENTS' ? fetchOrders() : fetchTeacherOrders())}
+            className="px-3 py-1.5 bg-white border border-rose-300 rounded-lg text-rose-700"
+          >
+            Retry
+          </button>
+        </div>
+      )}
+
       {/* ========================================================================= */}
       {/* SECTION 1: STUDENT ORDERS                                                 */}
       {/* ========================================================================= */}
@@ -385,28 +430,48 @@ function StaffOrdersContent() {
               </p>
 
               {orders.map((o) => {
-                const firstItem = o.items?.[0];
                 const isCollected = o.orderStatus === 'COLLECTED';
 
-                // Group duplicate items by meal name
-                const groupedMap = new Map<
-                  string,
-                  { mealName: string; isVegetarian: boolean; quantity: number }
-                >();
+                // One block per child: a parent can order for several children in one payment,
+                // and staff must see whose meal they are handing over.
+                type StudentGroup = {
+                  key: string;
+                  name: string;
+                  grade: string;
+                  division: string;
+                  rollNo: string;
+                  allergens: string[];
+                  meals: Map<string, { mealName: string; isVegetarian: boolean; quantity: number }>;
+                };
+                const studentMap = new Map<string, StudentGroup>();
                 for (const it of o.items || []) {
-                  const key = it.mealName || it.mealId;
-                  const existing = groupedMap.get(key);
+                  const key = it.studentId || it.studentName || 'student';
+                  let group = studentMap.get(key);
+                  if (!group) {
+                    group = {
+                      key,
+                      name: it.studentName || 'Student',
+                      grade: it.studentGrade || '-',
+                      division: it.studentDivision || '-',
+                      rollNo: it.studentRollNo || '',
+                      allergens: [],
+                      meals: new Map(),
+                    };
+                    studentMap.set(key, group);
+                  }
+                  if (it.hasAllergyAlert && it.conflictAllergens && !group.allergens.includes(it.conflictAllergens)) {
+                    group.allergens.push(it.conflictAllergens);
+                  }
+                  const mealKey = it.mealName || it.mealId;
+                  const existing = group.meals.get(mealKey);
                   if (existing) {
                     existing.quantity += it.quantity;
                   } else {
-                    groupedMap.set(key, {
-                      mealName: it.mealName,
-                      isVegetarian: it.isVegetarian,
-                      quantity: it.quantity,
-                    });
+                    group.meals.set(mealKey, { mealName: it.mealName, isVegetarian: it.isVegetarian, quantity: it.quantity });
                   }
                 }
-                const groupedItems = Array.from(groupedMap.values());
+                const students = Array.from(studentMap.values());
+                const hasAllergyToday = (o.items || []).some((it: { hasAllergyAlert?: boolean }) => it.hasAllergyAlert);
 
                 return (
                   <div
@@ -417,43 +482,46 @@ function StaffOrdersContent() {
                         : 'bg-white border-slate-200 hover:border-amber-400 hover:shadow-md'
                     }`}
                   >
-                    {/* Top Header: Class & Roll Number */}
-                    <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-                      <div className="flex items-center gap-2">
-                        <span className="inline-flex items-center px-3 py-1 rounded-xl text-xs font-black bg-purple-100 text-purple-800 border border-purple-200/80 tracking-wide">
-                          Class {firstItem?.studentGrade || '-'}-{firstItem?.studentDivision || '-'}
-                        </span>
-                        {firstItem?.studentRollNo && (
-                          <span className="inline-flex items-center px-2.5 py-1 rounded-xl text-xs font-extrabold bg-slate-100 text-slate-700">
-                            Roll #{firstItem.studentRollNo}
+                    {students.map((st) => (
+                      <div key={st.key} className="space-y-2 pb-3 border-b border-slate-100 last:border-b-0 last:pb-0">
+                        {/* Student: name, class & roll number */}
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="font-black text-slate-900 text-sm break-words">{st.name}</span>
+                          <span className="inline-flex items-center px-3 py-1 rounded-xl text-xs font-black bg-purple-100 text-purple-800 border border-purple-200/80 tracking-wide">
+                            Class {st.grade}-{st.division}
                           </span>
+                          {st.rollNo && (
+                            <span className="inline-flex items-center px-2.5 py-1 rounded-xl text-xs font-extrabold bg-slate-100 text-slate-700">
+                              Roll #{st.rollNo}
+                            </span>
+                          )}
+                        </div>
+
+                        {Array.from(st.meals.values()).map((it, i) => (
+                          <div key={i} className="flex items-center justify-between gap-3 py-1 text-xs">
+                            <div className="flex items-center gap-2 font-bold text-slate-800 text-[13px] leading-tight">
+                              <VegBadge isVegetarian={it.isVegetarian} size="sm" />
+                              <span>{it.mealName}</span>
+                            </div>
+                            <span className="font-black text-amber-900 bg-amber-50 border border-amber-200/80 px-2.5 py-1 rounded-lg text-xs shrink-0">
+                              Qty: {it.quantity}
+                            </span>
+                          </div>
+                        ))}
+
+                        {st.allergens.length > 0 && (
+                          <div className="p-2.5 bg-rose-50 border border-rose-200 rounded-xl flex items-center gap-2 text-rose-700 text-xs font-bold">
+                            <ShieldAlert className="w-4 h-4 text-rose-600 shrink-0" />
+                            <span>Allergy alert for {st.name}: {st.allergens.join(', ')}</span>
+                          </div>
                         )}
                       </div>
-                    </div>
+                    ))}
 
-                    {/* Ordered Items List */}
-                    <div className="space-y-2">
-                      {groupedItems.map((it, i) => (
-                        <div
-                          key={i}
-                          className="flex items-center justify-between gap-3 py-1 text-xs"
-                        >
-                          <div className="flex items-center gap-2 font-bold text-slate-800 text-[13px] leading-tight">
-                            <VegBadge isVegetarian={it.isVegetarian} size="sm" />
-                            <span>{it.mealName}</span>
-                          </div>
-                          <span className="font-black text-amber-900 bg-amber-50 border border-amber-200/80 px-2.5 py-1 rounded-lg text-xs shrink-0">
-                            Qty: {it.quantity}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-
-                    {/* Allergy Alert Warning if any */}
-                    {o.hasAnyAllergyAlert && (
+                    {hasAllergyToday && students.every((st) => st.allergens.length === 0) && (
                       <div className="p-2.5 bg-rose-50 border border-rose-200 rounded-xl flex items-center gap-2 text-rose-700 text-xs font-bold">
                         <ShieldAlert className="w-4 h-4 text-rose-600 shrink-0" />
-                        <span>Allergy alert noted on file for this student.</span>
+                        <span>Allergy alert noted on file. Check before handing over.</span>
                       </div>
                     )}
 
@@ -475,11 +543,17 @@ function StaffOrdersContent() {
                       <button
                         type="button"
                         onClick={() => handleMarkCollected(o.id)}
-                        disabled={updatingId === o.id}
-                        className="inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-amber-500 hover:bg-amber-600 active:bg-amber-700 text-white rounded-xl text-xs font-black shadow-sm hover:shadow transition-all cursor-pointer shrink-0"
+                        disabled={updatingIds.has(o.id)}
+                        className="inline-flex items-center justify-center gap-2 px-4 py-2.5 disabled:opacity-60 bg-amber-500 hover:bg-amber-600 active:bg-amber-700 text-white rounded-xl text-xs font-black shadow-sm hover:shadow transition-all cursor-pointer shrink-0"
                       >
                         <UserCheck className="w-4 h-4" />
-                        <span>Mark Given</span>
+                        <span>
+                          {updatingIds.has(o.id)
+                            ? 'Saving…'
+                            : students.length > 1
+                            ? `Mark Given (all ${students.length} children)`
+                            : 'Mark Given'}
+                        </span>
                       </button>
                       )}
                     </div>
@@ -618,8 +692,8 @@ function StaffOrdersContent() {
                         <button
                           type="button"
                           onClick={() => handleMarkTeacherGiven(to.id)}
-                          disabled={updatingId === to.id}
-                          className="inline-flex items-center justify-center gap-2 px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white rounded-xl text-xs font-black shadow-sm transition-all cursor-pointer"
+                          disabled={updatingIds.has(to.id)}
+                          className="inline-flex items-center justify-center gap-2 px-5 py-2.5 disabled:opacity-60 bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white rounded-xl text-xs font-black shadow-sm transition-all cursor-pointer"
                         >
                           <UserCheck className="w-4 h-4" />
                           <span>Mark Given</span>
@@ -758,7 +832,7 @@ function StaffOrdersContent() {
                       </div>
                     </div>
                     <span className="px-2.5 py-1 bg-amber-50 text-amber-800 border border-amber-200 rounded-lg text-xs font-black">
-                      {todayKitchenData?.totalOrders ?? 0} Orders
+                      {todayKitchenData?.totalOrders ?? 0} Student Orders
                     </span>
                   </div>
 
@@ -811,6 +885,7 @@ function StaffOrdersContent() {
                       })}
                     </div>
                   )}
+                  <TeacherMealsNote data={todayKitchenData} />
                 </div>
 
                 {/* SECTION 2: TOMORROW'S TOTAL ORDERS */}
@@ -828,7 +903,7 @@ function StaffOrdersContent() {
                       </div>
                     </div>
                     <span className="px-2.5 py-1 bg-indigo-50 text-indigo-800 border border-indigo-200 rounded-lg text-xs font-black">
-                      {tomorrowKitchenData?.totalOrders ?? 0} Orders
+                      {tomorrowKitchenData?.totalOrders ?? 0} Student Orders
                     </span>
                   </div>
 
@@ -881,6 +956,7 @@ function StaffOrdersContent() {
                       })}
                     </div>
                   )}
+                  <TeacherMealsNote data={tomorrowKitchenData} />
                 </div>
               </div>
             </div>
@@ -902,5 +978,18 @@ export default function StaffOrdersPage() {
     >
       <StaffOrdersContent />
     </Suspense>
+  );
+}
+
+/** Teacher meals for the day, listed separately from the student counts above. */
+function TeacherMealsNote({ data }: { data?: { teacherMealsTotal?: number; teacherMeals?: Array<{ mealName: string; quantity: number }> } | null }) {
+  if (!data?.teacherMealsTotal) return null;
+  return (
+    <div className="p-3 rounded-2xl border border-emerald-200 bg-emerald-50/60 text-xs text-emerald-900 space-y-1">
+      <p className="font-black uppercase tracking-wider">Plus teacher meals: {data.teacherMealsTotal}</p>
+      <p className="font-semibold break-words">
+        {(data.teacherMeals || []).map((m) => `${m.mealName} × ${m.quantity}`).join(', ')}
+      </p>
+    </div>
   );
 }

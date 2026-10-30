@@ -19,6 +19,10 @@ import {
 import VegBadge from '@/components/VegBadge';
 import { formatDatePretty, getTodayString, formatINR, formatDateTimePretty } from '@/lib/utils';
 import { useToast } from '@/components/ToastContext';
+import { broadcastSyncEvent, useSyncWatcher } from '@/lib/client-sync';
+
+/** The fields used to show one day of an order (the API returns more). */
+type DayOrder = { serviceStatus?: string | null; orderStatus?: string; items?: Array<{ date?: string }> };
 
 export default function StaffOrderHistoryPage() {
   const { showToast } = useToast();
@@ -33,8 +37,8 @@ export default function StaffOrderHistoryPage() {
   const [studentOrders, setStudentOrders] = useState<any[]>([]);
   const [teacherOrders, setTeacherOrders] = useState<any[]>([]);
 
-  const fetchHistory = async () => {
-    setLoading(true);
+  const fetchHistory = async (silent = false) => {
+    if (!silent) setLoading(true);
     try {
       const [studentRes, teacherRes] = await Promise.all([
         fetch(`/api/admin/orders?date=${selectedDate}`),
@@ -43,11 +47,18 @@ export default function StaffOrderHistoryPage() {
 
       if (studentRes.ok) {
         const studentData = await studentRes.json();
-        // Only include orders that have been marked COLLECTED / GIVEN
-        const givenStudents = (studentData.orders || []).filter(
-          (o: any) => o.orderStatus === 'COLLECTED'
-        );
+        // Only include orders whose meal for this date was marked COLLECTED / GIVEN
+        // (a multi-day order appears only on the days actually handed over).
+        const givenStudents = (studentData.orders || [])
+          .map((o: DayOrder) => ({
+            ...o,
+            orderStatus: o.serviceStatus || o.orderStatus,
+            items: (o.items || []).filter((it) => !it.date || it.date === selectedDate),
+          }))
+          .filter((o: DayOrder) => o.orderStatus === 'COLLECTED');
         setStudentOrders(givenStudents);
+      } else {
+        showToast('Could not load student history. Pull to refresh or try again.', 'error');
       }
 
       if (teacherRes.ok) {
@@ -57,6 +68,8 @@ export default function StaffOrderHistoryPage() {
           (o: any) => o.orderStatus === 'GIVEN' || o.orderStatus === 'COLLECTED'
         );
         setTeacherOrders(givenTeachers);
+      } else {
+        showToast('Could not load teacher history. Please try again.', 'error');
       }
     } catch (err) {
       console.error('Failed to load history:', err);
@@ -70,6 +83,9 @@ export default function StaffOrderHistoryPage() {
     fetchHistory();
   }, [selectedDate]);
 
+  // Handovers and undos made on another device appear without a manual refresh.
+  useSyncWatcher({ onOrdersUpdate: () => fetchHistory(true), onTeacherOrdersUpdate: () => fetchHistory(true) });
+
   // Revert a given student order back to Active
   const handleRevertStudentOrder = async (orderId: string) => {
     if (!confirm('Revert this order back to Active Orders?')) return;
@@ -78,15 +94,17 @@ export default function StaffOrderHistoryPage() {
       const res = await fetch('/api/admin/orders', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ orderId, orderStatus: 'CONFIRMED' }),
+        body: JSON.stringify({ orderId, orderStatus: 'CONFIRMED', date: selectedDate }),
       });
 
       if (res.ok) {
         showToast('Order reverted back to Active Orders', 'success');
         setStudentOrders((prev) => prev.filter((o) => o.id !== orderId));
+        broadcastSyncEvent('ORDERS_UPDATED');
       } else {
         const data = await res.json().catch(() => ({}));
         showToast(data.error || 'Failed to revert order', 'error');
+        fetchHistory(true);
       }
     } catch {
       showToast('Network error reverting order', 'error');
@@ -109,8 +127,11 @@ export default function StaffOrderHistoryPage() {
       if (res.ok) {
         showToast('Teacher order reverted back to Active Orders', 'success');
         setTeacherOrders((prev) => prev.filter((o) => o.id !== orderId));
+        broadcastSyncEvent('TEACHER_ORDERS_UPDATED');
       } else {
-        showToast('Failed to revert teacher order', 'error');
+        const data = await res.json().catch(() => ({}));
+        showToast(data.error || 'Failed to revert teacher order', 'error');
+        fetchHistory(true);
       }
     } catch {
       showToast('Network error reverting teacher order', 'error');
@@ -205,7 +226,7 @@ export default function StaffOrderHistoryPage() {
           </Link>
 
           <button
-            onClick={fetchHistory}
+            onClick={() => fetchHistory()}
             disabled={loading}
             className="p-2.5 bg-white border border-slate-200 rounded-xl hover:bg-slate-50 text-slate-700 transition-colors shadow-2xs cursor-pointer"
             title="Refresh History"

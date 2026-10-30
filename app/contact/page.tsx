@@ -26,13 +26,25 @@ export default function ContactPage() {
 
   const formattedAddress = getFormattedAddress();
 
+  // There is no server-side mail service: the message is handed to the visitor's own email app,
+  // addressed to the support mailbox, so nothing is silently lost.
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     setSubmitting(true);
-    setTimeout(() => {
-      setSubmitting(false);
-      setSubmitted(true);
-    }, 500);
+    const subject = `School Bite enquiry${orderId.trim() ? ` – Order ${orderId.trim()}` : ''}`;
+    const body = [
+      message.trim(),
+      '',
+      `Name: ${name.trim()}`,
+      `Email: ${email.trim()}`,
+      phone.trim() ? `Phone: ${phone.trim()}` : '',
+      orderId.trim() ? `Order ID: ${orderId.trim()}` : '',
+    ]
+      .filter((line, i) => line !== '' || i === 1)
+      .join('\n');
+    window.location.href = `mailto:${BUSINESS_CONFIG.supportEmail}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+    setSubmitting(false);
+    setSubmitted(true);
   };
 
   const whatsappNumber = BUSINESS_CONFIG.supportPhone.replace(/\D/g, '');
@@ -168,9 +180,11 @@ export default function ContactPage() {
             {submitted ? (
               <div className="p-6 bg-emerald-50 border border-emerald-200 rounded-2xl text-center space-y-3">
                 <CheckCircle2 className="w-12 h-12 text-emerald-600 mx-auto" />
-                <h3 className="text-base font-bold text-emerald-900">Inquiry Received</h3>
+                <h3 className="text-base font-bold text-emerald-900">Your email app has opened</h3>
                 <p className="text-xs sm:text-sm text-emerald-700 leading-relaxed">
-                  Thank you for reaching out to {BUSINESS_CONFIG.brandName}. Our support team will review your message and contact you via email or phone.
+                  Please press <strong>Send</strong> in your email app to deliver your message. If it did not open, email{' '}
+                  <a className="underline font-bold" href={`mailto:${BUSINESS_CONFIG.supportEmail}`}>{BUSINESS_CONFIG.supportEmail}</a> or call{' '}
+                  <a className="underline font-bold" href={`tel:${BUSINESS_CONFIG.supportPhoneRaw}`}>{BUSINESS_CONFIG.supportPhone}</a>.
                 </p>
                 <button
                   type="button"

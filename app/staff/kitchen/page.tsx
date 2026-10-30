@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useEffect, useState, useMemo, Suspense } from 'react';
+import Link from 'next/link';
 import {
   CalendarDays,
   CalendarOff,
@@ -318,7 +319,7 @@ function StaffKitchenContent() {
               Official Timetable
             </span>
             <span className="text-xs font-bold text-slate-500">
-              October 2026 Brunch Master System
+              School Brunch Timetable
             </span>
           </div>
           <h1 className="text-xl sm:text-2xl lg:text-3xl font-black text-slate-900 tracking-tight flex items-center gap-2 mt-1">
@@ -326,11 +327,18 @@ function StaffKitchenContent() {
             <span>Canteen Daily Production Schedule</span>
           </h1>
           <p className="text-xs sm:text-sm text-slate-500 mt-1">
-            Authoritative daily brunch menu derived from the official October 2026 school timetable.
+            Daily brunch menu from the school&apos;s monthly timetable.
           </p>
         </div>
 
         <div className="flex items-center gap-2 self-start md:self-auto flex-wrap">
+          <Link
+            href="/staff/menu-import"
+            className="px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-bold flex items-center gap-2"
+          >
+            <CalendarDays className="w-4 h-4" />
+            Upload monthly menu
+          </Link>
           <button
             type="button"
             onClick={() => setIsTimetableModalOpen(true)}
@@ -389,8 +397,8 @@ function StaffKitchenContent() {
             <input
               type="date"
               value={selectedDateStr}
-              min="2026-10-01"
-              max="2026-10-31"
+              min="2026-01-01"
+              max={getOffsetDateString(120)}
               onChange={(e) => setSelectedDateStr(e.target.value)}
               className="text-xs font-black text-slate-800 bg-slate-50 border border-slate-200 rounded-xl px-3 py-1.5 focus:outline-hidden focus:border-amber-500 cursor-pointer shadow-2xs"
             />
@@ -439,14 +447,14 @@ function StaffKitchenContent() {
                 Official Daily Brunch Schedule
               </span>
               <span className="text-xs font-extrabold text-slate-600">
-                {officialDayEntry?.day || 'Scheduled Day'}
+                {new Date(`${selectedDateStr}T12:00:00+05:30`).toLocaleDateString('en-IN', { weekday: 'long', timeZone: 'Asia/Kolkata' })}
               </span>
             </div>
             <h2 className="text-xl sm:text-2xl font-black text-slate-900 tracking-tight mt-1 flex items-center gap-2">
               <span>{formatDatePretty(selectedDateStr)}</span>
             </h2>
             <p className="text-xs text-slate-600 mt-1">
-              Authoritative schedule from the school spreadsheet. These dishes are automatically active for student orders.
+              Saved schedule for this date. Active dishes can be ordered by parents until the ordering deadline.
             </p>
           </div>
 
@@ -485,18 +493,22 @@ function StaffKitchenContent() {
               return mCat === cat;
             });
 
-            const isHoliday = Boolean(officialMenu?.isHoliday || dbMenu?.isHoliday);
+            // The saved menu is authoritative (it reflects imports and staff corrections); the
+            // built-in October 2026 table is only a fallback for dates with no saved menu.
+            const isHoliday = dbMenu ? Boolean(dbMenu.isHoliday) : Boolean(officialMenu?.isHoliday);
             const holidayReason =
-              officialMenu?.holidayReason || dbMenu?.holidayReason || 'Holiday Today — No Brunch Scheduled';
+              (dbMenu ? dbMenu.holidayReason : officialMenu?.holidayReason) || 'Holiday Today — No Brunch Scheduled';
 
             const dishName =
-              officialMenu?.dish && !officialMenu.isHoliday
-                ? officialMenu.dish
-                : dbMenu?.meal?.name && !dbMenu?.isHoliday
+              dbMenu?.meal?.name && !dbMenu?.isHoliday
                 ? dbMenu.meal.name
+                : !dbMenu && officialMenu?.dish && !officialMenu.isHoliday
+                ? officialMenu.dish
                 : isHoliday
                 ? 'Holiday Today — No Brunch Scheduled'
-                : 'Scheduled Brunch';
+                : 'No menu published';
+            // Parents can only order from a saved, active menu; the October table is reference only.
+            const publishState = !dbMenu ? 'NOT_PUBLISHED' : dbMenu.isActive === false ? 'DISABLED' : 'PUBLISHED';
 
             // Lookup meal details from master catalog for ingredient notes
             const catalogMeal = OCTOBER_2026_MEAL_CATALOG.find(
@@ -610,14 +622,19 @@ function StaffKitchenContent() {
                       <Clock className="w-4 h-4" />
                       <span>Past Service (Closed)</span>
                     </span>
-                  ) : (
+                  ) : publishState === 'PUBLISHED' ? (
                     <span className="text-emerald-700 flex items-center gap-1.5">
-                      <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-                      <span>Official Timetable Dish</span>
+                      <span className="w-2 h-2 rounded-full bg-emerald-500" />
+                      <span>Published: parents can order</span>
+                    </span>
+                  ) : (
+                    <span className="text-rose-700 flex items-center gap-1.5">
+                      <span className="w-2 h-2 rounded-full bg-rose-500" />
+                      <span>{publishState === 'DISABLED' ? 'Disabled: parents cannot order' : 'Not published: parents cannot order'}</span>
                     </span>
                   )}
                   <span className="px-2.5 py-1 bg-amber-100 text-amber-900 rounded-lg text-[10px] font-black uppercase tracking-wider">
-                    Excel Timetable
+                    {dbMenu ? 'Saved Menu' : 'Timetable Reference'}
                   </span>
                 </div>
               </div>
@@ -629,7 +646,7 @@ function StaffKitchenContent() {
         <div className="p-3.5 bg-amber-100/70 border border-amber-200/90 rounded-2xl flex items-start gap-3 text-xs text-amber-950 font-medium">
           <Info className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
           <p>
-            <strong>Canteen Team Notice:</strong> The official timetable above automatically governs student orders for each grade category. You do <em>not</em> need to select items or checkboxes from the recipe catalog to make this timetable appear.
+            <strong>Canteen Team Notice:</strong> Parents can only order a dish that shows <em>Published</em> above. A dish marked <em>Timetable Reference</em> or <em>Not published</em> is not on sale: import or publish the monthly menu for that date first. You do <em>not</em> need to select items from the recipe catalog.
           </p>
         </div>
       </section>

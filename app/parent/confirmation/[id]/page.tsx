@@ -20,6 +20,21 @@ import { formatINR, formatDateTimePretty, formatDatePretty } from '@/lib/utils';
 import VegBadge from '@/components/VegBadge';
 import { useCart } from '@/components/CartContext';
 
+const CLEARED_ORDERS_STORAGE = 'sb_cart_cleared_orders';
+
+/** True the first time this paid order is shown in this browser; also ends its checkout session. */
+function firstPaidVisit(orderId: string): boolean {
+  try {
+    const seen: string[] = JSON.parse(localStorage.getItem(CLEARED_ORDERS_STORAGE) || '[]');
+    if (seen.includes(orderId)) return false;
+    localStorage.setItem(CLEARED_ORDERS_STORAGE, JSON.stringify([...seen, orderId].slice(-20)));
+    sessionStorage.removeItem('sb_checkout_key');
+  } catch {
+    // storage unavailable: clear as before
+  }
+  return true;
+}
+
 export default function OrderConfirmationPage() {
   const params = useParams();
   const orderId = params?.id as string;
@@ -28,42 +43,50 @@ export default function OrderConfirmationPage() {
   const [order, setOrder] = useState<any | null>(null);
   const [loading, setLoading] = useState(true);
   const [verifying, setVerifying] = useState(false);
+  // Payment state as reported by the server's verification with Cashfree:
+  // PAID | PENDING (not confirmed yet) | NOT_PAID | EXCEPTION (paid, no order) | CANCELLED | UNKNOWN (could not check)
+  const [state, setState] = useState<string>('UNKNOWN');
+  const [message, setMessage] = useState('');
+  // For EXCEPTION: PENDING_REVIEW | REFUND_PENDING | REFUNDED | REFUND_FAILED
+  const [issueState, setIssueState] = useState('');
+  const [checks, setChecks] = useState(0);
 
   const loadAndVerifyOrder = async () => {
     if (!orderId) return;
     setVerifying(true);
     try {
-      // 1. Trigger server verification with Cashfree API
+      let data: any = null;
       try {
-        await fetch('/api/parent/orders/verify', {
+        const res = await fetch('/api/parent/orders/verify', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ orderId }),
         });
+        data = await res.json().catch(() => null);
+        if (!res.ok) data = { state: res.status === 404 ? 'NOT_FOUND' : 'UNKNOWN', message: data?.error };
       } catch {
-        // Continue to query order
+        data = { state: 'UNKNOWN' };
       }
 
-      // 2. Fetch updated order
-      const res = await fetch('/api/parent/orders');
-      if (res.ok) {
-        const data = await res.json();
-        const match = data.orders?.find((o: any) => o.id === orderId);
-        if (match) {
-          setOrder(match);
-          if (match.paymentStatus === 'PAID') {
-            clearCart();
-            // Confetti for successful payment
-            try {
-              confetti({
-                particleCount: 80,
-                spread: 70,
-                origin: { y: 0.6 },
-              });
-            } catch {
-              // Ignore confetti error
-            }
-          }
+      const nextState = data?.state || 'UNKNOWN';
+      setState(nextState);
+      setMessage(data?.message || '');
+      setIssueState(data?.issueState || '');
+
+      if (nextState === 'PAID' || nextState === 'CANCELLED') {
+        const res = await fetch(`/api/parent/orders?id=${encodeURIComponent(orderId)}`);
+        if (res.ok) {
+          const listing = await res.json();
+          setOrder(listing.orders?.find((o: any) => o.id === orderId) || null);
+        }
+      }
+      if (nextState === 'PAID' && firstPaidVisit(orderId)) {
+        // Only on the first visit: reopening an old order's page must not empty a newer cart.
+        clearCart();
+        try {
+          confetti({ particleCount: 80, spread: 70, origin: { y: 0.6 } });
+        } catch {
+          // Ignore confetti error
         }
       }
     } catch (err) {
@@ -71,12 +94,20 @@ export default function OrderConfirmationPage() {
     } finally {
       setLoading(false);
       setVerifying(false);
+      setChecks((n) => n + 1);
     }
   };
 
   useEffect(() => {
     loadAndVerifyOrder();
   }, [orderId]);
+
+  // While the result is unresolved, keep checking for about two minutes.
+  useEffect(() => {
+    if ((state !== 'PENDING' && state !== 'UNKNOWN') || checks === 0 || checks >= 24) return;
+    const timer = setTimeout(loadAndVerifyOrder, 5000);
+    return () => clearTimeout(timer);
+  }, [state, checks]);
 
   if (loading) {
     return (
@@ -87,10 +118,25 @@ export default function OrderConfirmationPage() {
     );
   }
 
-  const isPaid = order?.paymentStatus === 'PAID';
-  const isPending = order?.paymentStatus === 'PENDING';
-  const isFailed = order?.paymentStatus === 'FAILED';
+  const isPaid = state === 'PAID';
+  const isPending = state === 'PENDING' || state === 'UNKNOWN';
+  // Automatic checks stop after about two minutes.
+  const stoppedChecking = isPending && checks >= 24;
   const primaryPayment = order?.payments?.[0];
+  const statusPanel = (tone: 'amber' | 'rose' | 'sky', title: string, text: string, action?: React.ReactNode) => (
+    <>
+      <div
+        className={`inline-flex items-center justify-center w-16 h-16 rounded-3xl mb-2 ${
+          tone === 'amber' ? 'bg-amber-100 text-amber-600' : tone === 'rose' ? 'bg-rose-100 text-rose-600' : 'bg-sky-100 text-sky-600'
+        }`}
+      >
+        <AlertCircle className="w-10 h-10" />
+      </div>
+      <h1 className="text-2xl sm:text-3xl font-black text-slate-900 tracking-tight">{title}</h1>
+      <p className="text-sm text-slate-600 max-w-md mx-auto">{text}</p>
+      {action}
+    </>
+  );
 
   return (
     <div className="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8 py-12 space-y-8">
@@ -111,41 +157,64 @@ export default function OrderConfirmationPage() {
         ) : isPending ? (
           <>
             <div className="inline-flex items-center justify-center w-16 h-16 rounded-3xl bg-amber-100 text-amber-600 shadow-lg shadow-amber-500/10 mb-2">
-              <RefreshCw className="w-9 h-9 animate-spin" />
+              <RefreshCw className={`w-9 h-9 ${stoppedChecking ? '' : 'animate-spin'}`} />
             </div>
-            <h1 className="text-3xl sm:text-4xl font-black text-slate-900 tracking-tight">
-              Payment Awaiting Confirmation
+            <h1 className="text-2xl sm:text-3xl font-black text-slate-900 tracking-tight">
+              {state === 'UNKNOWN' ? 'Checking Your Payment' : 'Payment Awaiting Confirmation'}
             </h1>
-            <p className="text-sm text-slate-500 max-w-md mx-auto">
-              Your payment is being confirmed with the bank. If you just completed payment, click below to verify status.
+            <p className="text-sm text-slate-600 max-w-md mx-auto">
+              {state === 'UNKNOWN'
+                ? 'We could not reach the payment service just now. We will keep checking. Please do not pay again.'
+                : message || 'If you completed the payment, it can take a minute to confirm. Please do not pay again.'}
             </p>
             <button
               onClick={loadAndVerifyOrder}
               disabled={verifying}
-              className="mt-2 inline-flex items-center gap-2 px-4 py-2 bg-amber-500 hover:bg-amber-600 text-white rounded-xl text-xs font-bold shadow-md transition-all cursor-pointer"
+              className="mt-2 inline-flex items-center gap-2 px-5 py-3 bg-amber-500 hover:bg-amber-600 text-white rounded-xl text-sm font-bold shadow-md transition-all cursor-pointer"
             >
-              {verifying ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+              {verifying ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
               <span>Check Payment Status</span>
             </button>
+            {stoppedChecking && (
+              <p className="text-xs text-slate-500 max-w-md mx-auto">
+                Still not confirmed. If your payment failed or you closed the payment page, you can{' '}
+                <Link href="/parent/cart" className="font-bold text-amber-700 underline">go back to the cart and try again</Link>
+                . The same payment is reopened, so you cannot be charged twice for this order.
+              </p>
+            )}
           </>
+        ) : state === 'EXCEPTION' ? (
+          statusPanel('sky',
+            issueState === 'PENDING_REVIEW'
+              ? 'Payment Received — Awaiting Canteen Review'
+              : issueState === 'REFUNDED'
+              ? 'Payment Refunded'
+              : 'Payment Received — No Order Created',
+            message || 'The canteen will review this payment.',
+            <Link href="/parent/orders" className="mt-2 inline-block px-5 py-3 bg-slate-800 text-white rounded-xl text-sm font-bold">
+              View My Orders
+            </Link>)
+        ) : state === 'CANCELLED' ? (
+          statusPanel('sky', 'Order Cancelled',
+            order?.paymentStatus === 'REFUNDED'
+              ? 'This order was cancelled and the payment has been refunded.'
+              : order?.paymentStatus === 'REFUND_FAILED'
+              ? 'This order was cancelled. The refund could not be completed automatically; the canteen will follow up.'
+              : 'This order was cancelled. The refund is being processed.',
+            <Link href="/parent/orders" className="mt-2 inline-block px-5 py-3 bg-slate-800 text-white rounded-xl text-sm font-bold">
+              View My Orders
+            </Link>)
+        ) : state === 'NOT_FOUND' ? (
+          statusPanel('rose', 'Order Not Found', 'We could not find this order on your account.',
+            <Link href="/parent/orders" className="mt-2 inline-block px-5 py-3 bg-slate-800 text-white rounded-xl text-sm font-bold">
+              View My Orders
+            </Link>)
         ) : (
-          <>
-            <div className="inline-flex items-center justify-center w-16 h-16 rounded-3xl bg-rose-100 text-rose-600 shadow-lg shadow-rose-500/10 mb-2">
-              <AlertCircle className="w-10 h-10" />
-            </div>
-            <h1 className="text-3xl sm:text-4xl font-black text-slate-900 tracking-tight">
-              Payment Incomplete
-            </h1>
-            <p className="text-sm text-slate-500 max-w-md mx-auto">
-              The payment was not completed on Cashfree. You can return to checkout and retry your order.
-            </p>
-            <Link
-              href="/parent/cart"
-              className="mt-2 inline-block px-5 py-2.5 bg-amber-500 text-white rounded-xl text-xs font-bold shadow-md hover:bg-amber-600"
-            >
-              Return to Cart & Retry
-            </Link>
-          </>
+          statusPanel('rose', 'Payment Not Completed',
+            message || 'This payment was not completed, so no order was created. If money was debited, your bank will reverse it automatically.',
+            <Link href="/parent/cart" className="mt-2 inline-block px-5 py-3 bg-amber-500 text-white rounded-xl text-sm font-bold shadow-md hover:bg-amber-600">
+              Back to Cart
+            </Link>)
         )}
       </div>
 

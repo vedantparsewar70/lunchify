@@ -339,8 +339,8 @@ export default function AdminMenuPage() {
             <input
               type="date"
               value={selectedDate}
-              min="2026-10-01"
-              max="2026-10-31"
+              min="2026-01-01"
+              max={getOffsetDateString(120)}
               onChange={(e) => setSelectedDate(e.target.value)}
               className="text-xs font-bold text-slate-800 bg-slate-50 border border-slate-200 rounded-xl px-2.5 py-1.5 focus:outline-hidden"
             />

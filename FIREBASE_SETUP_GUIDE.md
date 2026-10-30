@@ -98,6 +98,28 @@ Once seeded, you can log in immediately with:
 
 ---
 
+## ⏳ Login Attempt Expiry (Firestore TTL)
+
+Failed-login counters are stored in two collections (`lib/login-throttle.ts`). Each record has an `expiresAt` timestamp. Turn on a TTL policy in **every** Firebase project (Preview and Production) so expired records are deleted automatically:
+
+| Collection group | TTL field |
+|---|---|
+| `login_attempts` | `expiresAt` |
+| `login_account_activity` | `expiresAt` |
+
+Firebase Console → **Firestore Database** → **TTL** → **Create policy**, or with the gcloud CLI:
+
+```bash
+gcloud firestore fields ttls update expiresAt --collection-group=login_attempts --enable-ttl --project=<PROJECT_ID>
+gcloud firestore fields ttls update expiresAt --collection-group=login_account_activity --enable-ttl --project=<PROJECT_ID>
+```
+
+TTL deletion usually happens within 24 hours of expiry; the login code ignores expired counters on its own, so this only keeps the collections small. Without the policy, login still works correctly.
+
+Records created by older code in `login_attempts` (keyed by email only, without `expiresAt`) are no longer read and are not removed by TTL; they are harmless and can be deleted manually.
+
+---
+
 ## 📁 Project Firebase File Architecture
 
 - [lib/firebase-admin.ts](file:///c:/Users/Vaibhav/Downloads/projects/school-bite/lib/firebase-admin.ts): Singleton Firebase Admin SDK initialization & credentials loader.

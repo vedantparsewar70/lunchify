@@ -1,7 +1,7 @@
 import { db } from '../lib/firebase-admin';
 import prisma from '../lib/prisma';
 import { getTodayString, getOffsetDateString, APP_TIMEZONE } from '../lib/utils';
-import { getMenuPublishStatus, ensureTomorrowMenuReset } from '../lib/menu-schedule';
+import { getMenuPublishStatus } from '../lib/menu-schedule';
 
 async function debugMenu() {
   console.log('TIMEZONE:', APP_TIMEZONE);

@@ -8,7 +8,7 @@ export const dynamic = 'force-dynamic';
 
 export async function GET(req: Request) {
   try {
-    const user = await getCurrentUser();
+    const user = await getCurrentUser(req);
     if (!user || (user.role !== 'STAFF' && user.role !== 'ADMIN')) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 403 });
     }
@@ -48,34 +48,46 @@ export async function GET(req: Request) {
 
 export async function PATCH(req: Request) {
   try {
-    const user = await getCurrentUser();
+    const user = await getCurrentUser(req);
     if (!user || (user.role !== 'STAFF' && user.role !== 'ADMIN')) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 403 });
     }
 
-    const body = await req.json();
+    const body = await req.json().catch(() => ({}));
     const { orderId, orderStatus = 'GIVEN' } = body;
 
-    if (!orderId) {
+    if (typeof orderId !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(orderId)) {
       return NextResponse.json({ error: 'orderId is required' }, { status: 400 });
+    }
+    // GIVEN = handed over; CONFIRMED = undo a mistaken handover. Nothing else is accepted here
+    // (cancellation and refunds are not done through this endpoint).
+    if (orderStatus !== 'GIVEN' && orderStatus !== 'CONFIRMED') {
+      return NextResponse.json({ error: 'Invalid order status' }, { status: 400 });
     }
 
     const ref = db.collection('teacher_orders').doc(orderId);
-    const snap = await ref.get();
-    if (!snap.exists) {
-      return NextResponse.json({ error: 'Order not found' }, { status: 404 });
-    }
-
-    const orderData = snap.data() || {};
-    if ((orderStatus === 'GIVEN' || orderStatus === 'COLLECTED') && orderData.paymentStatus !== 'PAID') {
-      return NextResponse.json({ error: 'Cannot mark an unpaid teacher order as given or collected.' }, { status: 400 });
-    }
-
-    await ref.update({
-      orderStatus,
-      collectedAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
+    const outcome = await db.runTransaction(async (transaction) => {
+      const snap = await transaction.get(ref);
+      if (!snap.exists) return { status: 404, error: 'Order not found' };
+      const orderData = snap.data() || {};
+      if (orderData.paymentStatus !== 'PAID') {
+        return { status: 400, error: 'Cannot change an unpaid teacher order.' };
+      }
+      const now = new Date().toISOString();
+      if (orderStatus === 'GIVEN') {
+        if (orderData.orderStatus === 'GIVEN' || orderData.orderStatus === 'COLLECTED') {
+          return { status: 409, error: 'This order has already been given.' };
+        }
+        transaction.update(ref, { orderStatus: 'GIVEN', collectedAt: now, updatedAt: now });
+      } else {
+        // Undo keeps the original collectedAt as an audit trail.
+        transaction.update(ref, { orderStatus: 'CONFIRMED', updatedAt: now, revertedAt: now, revertedBy: user.id });
+      }
+      return null;
     });
+    if (outcome) {
+      return NextResponse.json({ error: outcome.error }, { status: outcome.status });
+    }
 
     try {
       const { notifyTeacherOrdersUpdated, notifyOrdersUpdated } = await import('@/lib/sync-events');

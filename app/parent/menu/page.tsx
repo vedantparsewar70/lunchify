@@ -39,11 +39,44 @@ import {
   APP_TIMEZONE,
 } from '@/lib/utils';
 import {
-  OCTOBER_2026_TIMETABLE,
   STUDENT_CATEGORIES,
   getStudentCategory,
   StudentCategory,
 } from '@/lib/october-2026-timetable';
+
+const SCHEDULE_DAYS_AHEAD = 45;
+
+interface ScheduleDay {
+  date: string;
+  isHoliday: boolean;
+  reason: string | null;
+  dishes: Array<{ name: string; price: number | null; isVegetarian: boolean | null }>;
+}
+
+/** Groups menu records (one per meal) into one entry per service date. */
+function groupScheduleByDate(menus: any[]): ScheduleDay[] {
+  const byDate = new Map<string, ScheduleDay>();
+  for (const m of menus) {
+    const day: ScheduleDay = byDate.get(m.date) || { date: m.date, isHoliday: false, reason: null, dishes: [] };
+    if (m.isHoliday) {
+      day.isHoliday = day.dishes.length === 0;
+      day.reason = m.holidayReason || 'Holiday';
+    } else if (m.meal?.name) {
+      day.isHoliday = false;
+      day.dishes.push({
+        name: m.meal.name,
+        price: Number.isFinite(Number(m.meal.price)) ? Number(m.meal.price) : null,
+        isVegetarian: typeof m.meal.isVegetarian === 'boolean' ? m.meal.isVegetarian : null,
+      });
+    }
+    byDate.set(m.date, day);
+  }
+  return Array.from(byDate.values()).sort((a, b) => a.date.localeCompare(b.date));
+}
+
+function weekdayShort(date: string): string {
+  return new Date(`${date}T12:00:00+05:30`).toLocaleDateString('en-IN', { weekday: 'short', timeZone: 'Asia/Kolkata' });
+}
 
 function MenuPageContent() {
   const searchParams = useSearchParams();
@@ -121,10 +154,41 @@ function MenuPageContent() {
     fetchMenuForDate();
   }, [selectedDate, selectedChildId, activeStudentCategory, childrenLoading]);
 
+  // Upcoming schedule (any month) for the date chips and the timetable view, from the database.
+  const rangeEnd = useMemo(() => getOffsetDateString(SCHEDULE_DAYS_AHEAD, APP_TIMEZONE), []);
+  const [schedule, setSchedule] = useState<Record<string, ScheduleDay[]>>({});
+  const [scheduleLoaded, setScheduleLoaded] = useState<Record<string, boolean>>({});
+
+  const loadSchedule = async (category: string) => {
+    try {
+      const params = new URLSearchParams({ startDate: todayStr, endDate: rangeEnd, category });
+      const res = await fetch(`/api/menu?${params.toString()}`, { cache: 'no-store' });
+      if (!res.ok) return;
+      const data = await res.json();
+      setSchedule((prev) => ({ ...prev, [category]: groupScheduleByDate(data.menus || []) }));
+    } catch {
+      // keep the previous schedule
+    } finally {
+      setScheduleLoaded((prev) => ({ ...prev, [category]: true }));
+    }
+  };
+
+  useEffect(() => {
+    loadSchedule(activeStudentCategory);
+  }, [activeStudentCategory]);
+
+  useEffect(() => {
+    if (isTimetableModalOpen) loadSchedule(timetableCategoryTab);
+  }, [isTimetableModalOpen, timetableCategoryTab]);
+
+  const upcomingDays = schedule[activeStudentCategory] || [];
+  const timetableDays = schedule[timetableCategoryTab] || [];
+
   // Real-time synchronization
   useSyncWatcher({
     onMenuUpdate: () => {
       fetchMenuForDate(true);
+      loadSchedule(activeStudentCategory);
     },
   });
 
@@ -175,6 +239,11 @@ function MenuPageContent() {
       return;
     }
 
+    if (menuItem.isActive === false) {
+      showToast('This meal is not available on this date', 'error');
+      return;
+    }
+
     if (menuItem.availableQuantity <= 0) {
       showToast('Sorry, this meal is sold out for this date', 'error');
       return;
@@ -214,7 +283,7 @@ function MenuPageContent() {
         <div>
           <div className="flex items-center gap-2">
             <span className="px-2.5 py-0.5 rounded-full text-[10px] font-black bg-gradient-to-r from-amber-500 to-orange-500 text-white uppercase tracking-wider">
-              October 2026 Timetable
+              Monthly Timetable
             </span>
             <span className="text-xs font-semibold text-slate-500">
               School Brunch Schedule
@@ -326,22 +395,23 @@ function MenuPageContent() {
         )}
       </div>
 
-      {/* Date Navigator Bar across October 2026 */}
+      {/* Date Navigator Bar: upcoming dates from the published schedule */}
       <div className="bg-white p-3 sm:p-4 rounded-2xl border border-slate-200/90 shadow-2xs space-y-3">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-2 border-b border-slate-100">
           <div className="flex items-center gap-2">
             <Calendar className="w-4 h-4 text-amber-500" />
             <span className="text-xs font-extrabold text-slate-800 uppercase tracking-wider">
-              Select Brunch Date (October 2026)
+              Select Brunch Date
             </span>
           </div>
 
           <div className="flex items-center gap-2">
-            <label className="text-[11px] font-bold text-slate-500">Jump to Date:</label>
+            <label htmlFor="menu-date" className="text-[11px] font-bold text-slate-500">Jump to Date:</label>
             <input
+              id="menu-date"
               type="date"
-              min="2026-10-01"
-              max="2026-10-31"
+              min={todayStr}
+              max={rangeEnd}
               value={selectedDate}
               onChange={(e) => {
                 if (e.target.value) setSelectedDate(e.target.value);
@@ -353,16 +423,19 @@ function MenuPageContent() {
 
         {/* Horizontal Quick Date Chips */}
         <div className="flex items-center gap-2 overflow-x-auto pb-1 pt-0.5 scrollbar-thin">
-          {OCTOBER_2026_TIMETABLE.map((entry) => {
+          {scheduleLoaded[activeStudentCategory] && upcomingDays.length === 0 && (
+            <p className="text-sm text-slate-500 py-2">No upcoming menu has been published yet. Please check again later.</p>
+          )}
+          {upcomingDays.map((entry) => {
             const isSel = entry.date === selectedDate;
             const isEntryPast = entry.date < todayStr;
             const isEntryToday = entry.date === todayStr;
-            const catMenu = entry.menus[activeStudentCategory];
-            const isHol = catMenu.isHoliday;
+            const isHol = entry.isHoliday;
+            const catMenu = { dish: isHol ? entry.reason || 'Holiday' : entry.dishes.map((d) => d.name).join(' / ') };
 
             // Day number and short day name
             const dayNum = entry.date.split('-')[2];
-            const shortDay = entry.day.slice(0, 3);
+            const shortDay = weekdayShort(entry.date);
 
             let chipStyle = 'bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100';
             if (isSel) {
@@ -381,7 +454,7 @@ function MenuPageContent() {
                 type="button"
                 onClick={() => setSelectedDate(entry.date)}
                 className={`flex flex-col items-center justify-center min-w-[62px] px-2 py-1.5 rounded-xl border text-center transition-all cursor-pointer shrink-0 ${chipStyle}`}
-                title={`${entry.day}, ${entry.displayDate}: ${catMenu.dish}`}
+                title={`${formatDatePretty(entry.date)}: ${catMenu.dish}`}
               >
                 <span className="text-[10px] font-bold uppercase tracking-wider">{shortDay}</span>
                 <span className="text-sm font-black leading-tight">{dayNum}</span>
@@ -405,7 +478,7 @@ function MenuPageContent() {
             <Clock className="w-10 h-10 text-slate-300 mx-auto" />
             <h3 className="text-base font-bold text-slate-800">No Meals Published For {formatDatePretty(selectedDate)}</h3>
             <p className="text-xs text-slate-500">
-              Please choose another date or inspect the full October timetable.
+              Please choose another date from the list above.
             </p>
           </div>
         ) : (
@@ -413,9 +486,11 @@ function MenuPageContent() {
             {menus.map((menuItem) => {
               const isHoliday = Boolean(menuItem.isHoliday);
               const holidayReason = menuItem.holidayReason || 'School Holiday';
-              const isSoldOut = !isHoliday && !isPastDate && menuItem.availableQuantity <= 0;
+              // Disabled by the canteen for this date (the server also refuses it at checkout).
+              const isDisabled = !isHoliday && menuItem.isActive === false;
+              const isSoldOut = !isHoliday && !isPastDate && !isDisabled && menuItem.availableQuantity <= 0;
               const deadlinePassed = !isHoliday && isDeadlinePassed(selectedDate, menuItem.orderingDeadline);
-              const isOrderable = !isHoliday && !isPastDate && !isSoldOut && !deadlinePassed;
+              const isOrderable = !isHoliday && !isPastDate && !isDisabled && !isSoldOut && !deadlinePassed;
 
               const inCart = cartItems.find(
                 (c) =>
@@ -551,6 +626,8 @@ function MenuPageContent() {
                     <div className="text-xs text-slate-500">
                       {isPastDate ? (
                         <span>Ordering closed for this date</span>
+                      ) : isDisabled ? (
+                        <span className="text-slate-600 font-semibold">Not available on this date</span>
                       ) : deadlinePassed ? (
                         <span className="text-rose-600 font-semibold">Morning deadline ({menuItem.orderingDeadline} AM) passed</span>
                       ) : (
@@ -568,6 +645,13 @@ function MenuPageContent() {
                           className="w-full sm:w-auto px-5 py-2.5 bg-slate-100 text-slate-400 font-bold rounded-xl text-xs cursor-not-allowed"
                         >
                           Past Date — Closed
+                        </button>
+                      ) : isDisabled ? (
+                        <button
+                          disabled
+                          className="w-full sm:w-auto px-5 py-2.5 bg-slate-100 text-slate-400 font-bold rounded-xl text-xs cursor-not-allowed"
+                        >
+                          Not Available
                         </button>
                       ) : deadlinePassed ? (
                         <button
@@ -630,7 +714,7 @@ function MenuPageContent() {
         )}
       </div>
 
-      {/* FULL OCTOBER 2026 TIMETABLE MODAL */}
+      {/* UPCOMING TIMETABLE MODAL (from the published schedule) */}
       {isTimetableModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-950/60 backdrop-blur-xs animate-in fade-in duration-150">
           <div className="bg-white rounded-3xl shadow-2xl max-w-4xl w-full max-h-[90vh] flex flex-col border border-slate-100">
@@ -641,7 +725,7 @@ function MenuPageContent() {
                   Official Timetable
                 </span>
                 <h2 className="text-lg sm:text-xl font-extrabold text-slate-900 mt-1">
-                  October 2026 Brunch Schedule
+                  Upcoming Brunch Schedule
                 </h2>
                 <p className="text-xs text-slate-500 mt-0.5">
                   Click any upcoming date to quickly select and order that day&apos;s meal.
@@ -681,9 +765,17 @@ function MenuPageContent() {
 
             {/* Timetable Table List */}
             <div className="p-3 sm:p-6 overflow-y-auto flex-1 divide-y divide-slate-100 space-y-1">
-              {OCTOBER_2026_TIMETABLE.map((entry) => {
-                const catMenu = entry.menus[timetableCategoryTab];
-                const isHol = catMenu.isHoliday;
+              {scheduleLoaded[timetableCategoryTab] && timetableDays.length === 0 && (
+                <p className="text-sm text-slate-500 p-3">No upcoming menu has been published for {timetableCategoryTab} yet.</p>
+              )}
+              {timetableDays.map((entry) => {
+                const isHol = entry.isHoliday;
+                const catMenu = {
+                  holidayReason: entry.reason,
+                  dish: entry.dishes.map((d) => d.name).join(' / '),
+                  priceText: entry.dishes.map((d) => (d.price ? `₹${d.price}` : null)).filter(Boolean).join(' / '),
+                  vegText: entry.dishes.length > 0 && entry.dishes.every((d) => d.isVegetarian === true) ? 'Vegetarian' : '',
+                };
                 const isDatePast = entry.date < todayStr;
                 const isSelected = entry.date === selectedDate;
 
@@ -700,8 +792,8 @@ function MenuPageContent() {
                   >
                     <div className="flex items-center gap-3">
                       <div className="min-w-[70px]">
-                        <span className="text-[10px] font-bold text-slate-400 uppercase block">{entry.day}</span>
-                        <span className="text-sm font-black text-slate-800">{entry.displayDate}</span>
+                        <span className="text-[10px] font-bold text-slate-400 uppercase block">{weekdayShort(entry.date)}</span>
+                        <span className="text-sm font-black text-slate-800">{formatDatePretty(entry.date)}</span>
                       </div>
 
                       <div className="flex-1">
@@ -720,7 +812,7 @@ function MenuPageContent() {
                               {catMenu.dish}
                             </span>
                             <span className="text-[10px] text-slate-400 font-semibold">
-                              Nutritious School Brunch • Pure Veg (₹80)
+                              {[catMenu.vegText, catMenu.priceText].filter(Boolean).join(' • ')}
                             </span>
                           </div>
                         )}

@@ -1,7 +1,8 @@
 import { NextResponse } from 'next/server';
 import prisma from '@/lib/prisma';
-import { getTodayString, getOffsetDateString, APP_TIMEZONE, isDeadlinePassed } from '@/lib/utils';
+import { getTodayString, APP_TIMEZONE, isDeadlinePassed } from '@/lib/utils';
 import { evaluateAllergyConflict, getSystemSetting } from '@/lib/allergy';
+import { getCurrentUser } from '@/lib/auth';
 import { getStudentCategory } from '@/lib/october-2026-timetable';
 
 export function clearMenuCache() {
@@ -24,7 +25,6 @@ export async function GET(req: Request) {
     }
 
     const todayStr = getTodayString(APP_TIMEZONE);
-    const targetDate = date || (!startDate && !endDate ? todayStr : null);
 
     if (date) {
       whereClause.date = date;
@@ -35,16 +35,6 @@ export async function GET(req: Request) {
       };
     } else {
       whereClause.date = todayStr;
-    }
-
-    const tomorrowStr = getOffsetDateString(1, APP_TIMEZONE);
-    if (targetDate === tomorrowStr || whereClause.date === tomorrowStr) {
-      try {
-        const { ensureTomorrowMenuReset } = await import('@/lib/menu-schedule');
-        await ensureTomorrowMenuReset(tomorrowStr);
-      } catch {
-        // ignore
-      }
     }
 
     const allowAllergyOrdersSettingPromise = getSystemSetting('ALLOW_ALLERGY_ORDERS', 'true');
@@ -60,6 +50,13 @@ export async function GET(req: Request) {
           studentAllergies: { include: { allergy: true } },
         },
       });
+      // A child's name and allergies are private: only that child's parent (or staff) may see them.
+      const viewer = await getCurrentUser(req);
+      const mayView =
+        viewer && (viewer.role === 'STAFF' || viewer.role === 'ADMIN' || (student && viewer.parentId === student.parentId));
+      if (student && !mayView) {
+        return NextResponse.json({ error: 'Child not found' }, { status: 404 });
+      }
       if (student) {
         studentName = student.name;
         derivedStudentCategory = getStudentCategory(student.grade, (student as any).studentCategory);

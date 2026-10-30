@@ -30,7 +30,7 @@ export function formatDateTimePretty(dateStrOrObj: string | Date): string {
 
 export const APP_TIMEZONE = 'Asia/Kolkata';
 
-export function getTodayString(timeZone: string = APP_TIMEZONE): string {
+export function getTodayString(timeZone: string = APP_TIMEZONE, at: Date = new Date()): string {
   try {
     const formatter = new Intl.DateTimeFormat('en-CA', {
       timeZone,
@@ -38,9 +38,9 @@ export function getTodayString(timeZone: string = APP_TIMEZONE): string {
       month: '2-digit',
       day: '2-digit',
     });
-    return formatter.format(new Date());
+    return formatter.format(at);
   } catch {
-    const d = new Date();
+    const d = at;
     const year = d.getFullYear();
     const month = String(d.getMonth() + 1).padStart(2, '0');
     const day = String(d.getDate()).padStart(2, '0');
@@ -58,13 +58,12 @@ export function getOffsetDateString(offsetDays: number, timeZone: string = APP_T
   return `${targetYear}-${targetMonth}-${targetDay}`;
 }
 
-export function isDeadlinePassed(dateStr: string, deadlineTime: string = '08:30'): boolean {
+export function isDeadlinePassed(dateStr: string, deadlineTime: string = '08:30', at: Date = new Date()): boolean {
   try {
     const [hours, minutes] = deadlineTime.split(':').map(Number);
     // Explicitly parse in Asia/Kolkata timezone (+05:30)
     const deadline = new Date(`${dateStr}T${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:00+05:30`);
-    const now = new Date();
-    return now.getTime() > deadline.getTime();
+    return at.getTime() > deadline.getTime();
   } catch {
     return false;
   }

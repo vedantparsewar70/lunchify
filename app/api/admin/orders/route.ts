@@ -3,10 +3,11 @@ import prisma from '@/lib/prisma';
 import { getCurrentUser } from '@/lib/auth';
 import { db } from '@/lib/firebase-admin';
 import { cancelOrderWithRefund, OrderCancellationError } from '@/lib/order-cancellation';
+import { applyServiceStatus, orderServiceDates, resolveServiceDate, ServiceDateError, serviceStatusFor } from '@/lib/service-dates';
 
 export async function GET(req: Request) {
   try {
-    const user = await getCurrentUser();
+    const user = await getCurrentUser(req);
     if (!user || (user.role !== 'ADMIN' && user.role !== 'STAFF')) {
       return NextResponse.json({ error: 'Unauthorized: Admin or Staff access required' }, { status: 403 });
     }
@@ -20,6 +21,12 @@ export async function GET(req: Request) {
     const paymentStatus = searchParams.get('paymentStatus');
     const allergyFilter = searchParams.get('allergyFilter'); // 'ALL' | 'WITH_ALERTS' | 'NO_ALERTS'
     const search = searchParams.get('search')?.toLowerCase().trim();
+
+    // Default: paid, active orders (what the kitchen and handover lists need). Cancelled orders
+    // and their refund state are listed only when explicitly asked for.
+    const REFUND_STATES = ['REFUND_PENDING', 'REFUNDED', 'REFUND_FAILED'];
+    const wantsCancelled = orderStatus === 'CANCELLED' || REFUND_STATES.includes(paymentStatus || '');
+    const paymentStates: any = wantsCancelled ? { in: REFUND_STATES } : 'PAID';
 
     let orders: any[] = [];
 
@@ -38,7 +45,7 @@ export async function GET(req: Request) {
       orders = await prisma.order.findMany({
         where: {
           id: { in: matchingOrderIds },
-          paymentStatus: 'PAID',
+          paymentStatus: paymentStates,
         },
         include: {
           parent: {
@@ -58,7 +65,7 @@ export async function GET(req: Request) {
       // Query recent orders with sensible ceiling for admin history view
       orders = await prisma.order.findMany({
         where: {
-          paymentStatus: 'PAID',
+          paymentStatus: paymentStates,
         },
         take: 100,
         include: {
@@ -142,6 +149,11 @@ export async function GET(req: Request) {
         totalAmount: order.totalAmount,
         paymentStatus: order.paymentStatus,
         orderStatus: order.orderStatus,
+        // With a date filter: the status of that service date (what staff hand over today).
+        serviceDate: date || null,
+        serviceStatus: date ? serviceStatusFor(order, date) : null,
+        collectedAt: date ? order.serviceDates?.[date]?.collectedAt || (order.serviceDates ? null : order.collectedAt) || null : order.collectedAt || null,
+        isMultiDate: new Set((order.items || []).map((it: any) => it.date)).size > 1,
         hasAnyAllergyAlert,
         notes: order.notes,
         createdAt: order.createdAt instanceof Date ? order.createdAt.toISOString() : new Date(order.createdAt).toISOString(),
@@ -160,6 +172,7 @@ export async function GET(req: Request) {
           mealCategory: item.meal?.category || 'General',
           isVegetarian: Boolean(item.meal?.isVegetarian),
           date: item.date,
+          serviceStatus: serviceStatusFor(order, item.date),
           quantity: item.quantity,
           unitPrice: item.unitPrice,
           totalPrice: item.totalPrice,
@@ -185,13 +198,13 @@ export async function GET(req: Request) {
 
 export async function PATCH(req: Request) {
   try {
-    const user = await getCurrentUser();
+    const user = await getCurrentUser(req);
     if (!user || (user.role !== 'ADMIN' && user.role !== 'STAFF')) {
       return NextResponse.json({ error: 'Unauthorized: Admin or Staff access required' }, { status: 403 });
     }
 
-    const body = await req.json();
-    const { orderId, orderStatus } = body;
+    const body = await req.json().catch(() => ({}));
+    const { orderId, orderStatus, date } = body;
 
     if (!orderId || !orderStatus) {
       return NextResponse.json({ error: 'Order ID and new orderStatus are required' }, { status: 400 });
@@ -209,6 +222,9 @@ export async function PATCH(req: Request) {
         orderId,
         cancelledBy: user.id,
         blockedStatuses: ['COLLECTED'],
+        // Refunding a meal that was already handed over is an admin decision, never staff's.
+        allowPreviouslyCollected: user.role === 'ADMIN',
+        serviceDate: typeof date === 'string' && date ? date : undefined,
       });
       if (result.alreadyCancelled && result.refundAmount === 0) {
         return NextResponse.json(
@@ -231,50 +247,23 @@ export async function PATCH(req: Request) {
       });
     }
 
-    // Atomic transaction for order state changes: prevents race conditions & double collection
+    // Preparation and handover are per service date: giving Monday's meal never marks Tuesday's
+    // as given. A multi-date order must name the date; a single-date order may omit it.
     const updated = await db.runTransaction(async (transaction) => {
       const orderRef = db.collection('orders').doc(orderId);
       const orderSnap = await transaction.get(orderRef);
       if (!orderSnap.exists) {
-        throw new Error('Order not found');
+        throw new ServiceDateError('Order not found', 404);
       }
+      const itemsSnap = await transaction.get(db.collection('orderItems').where('orderId', '==', orderId));
 
       const orderData = orderSnap.data() || {};
-      const currentStatus = orderData.orderStatus || 'CONFIRMED';
+      const dates = orderServiceDates(itemsSnap.docs.map((d) => d.data()));
+      const serviceDate = resolveServiceDate(dates, date);
+      const update = applyServiceStatus(orderData, dates, serviceDate, orderStatus, user.id, new Date().toISOString());
 
-      // 1. Guard terminal states
-      if (currentStatus === 'CANCELLED') {
-        throw new Error('This order has already been cancelled and cannot be modified.');
-      }
-
-      if (currentStatus === 'COLLECTED') {
-        if (orderStatus === 'COLLECTED') {
-          throw new Error('This order has already been marked as given.');
-        }
-        if (orderStatus !== 'CONFIRMED') {
-          throw new Error('Collected orders can only be reverted back to active.');
-        }
-      }
-
-      // Guard: Cannot mark an unpaid, pending, or refunded order as collected
-      if (orderStatus === 'COLLECTED' && orderData.paymentStatus !== 'PAID') {
-        throw new Error('Cannot mark an unpaid or pending order as collected.');
-      }
-
-      const now = new Date().toISOString();
-
-      // 2. Status progression
-      const updateData: any = {
-        orderStatus,
-        updatedAt: now,
-      };
-      if (orderStatus === 'COLLECTED') {
-        updateData.collectedAt = now;
-      }
-
-      transaction.update(orderRef, updateData);
-
-      return { ...orderData, ...updateData };
+      transaction.update(orderRef, { ...update });
+      return { ...orderData, ...update, id: orderId, serviceDate, serviceStatus: update.serviceDates[serviceDate].status };
     });
 
     try {
@@ -286,11 +275,10 @@ export async function PATCH(req: Request) {
 
     return NextResponse.json({ success: true, order: updated });
   } catch (error: any) {
-    if (error instanceof OrderCancellationError) {
+    if (error instanceof OrderCancellationError || error instanceof ServiceDateError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }
     console.error('Error updating order status:', error);
-    const msg = error?.message || 'Failed to update order status';
-    return NextResponse.json({ error: msg }, { status: 400 });
+    return NextResponse.json({ error: 'Failed to update order status. Please try again.' }, { status: 500 });
   }
 }

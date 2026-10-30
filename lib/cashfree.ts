@@ -20,6 +20,20 @@ interface CreateOrderParams {
   returnUrl: string;
   notifyUrl?: string;
   orderNote?: string;
+  /** Payment link lifetime; defaults to CHECKOUT_EXPIRY_MINUTES from now. */
+  expiresAt?: Date;
+}
+
+/**
+ * A checkout's Cashfree payment session expires after this long, so a payment cannot complete
+ * days later. Cashfree requires the expiry to be at least 15 minutes ahead.
+ */
+export const CHECKOUT_EXPIRY_MINUTES = 30;
+
+/** ISO 8601 in India time (+05:30), the format shown in Cashfree's documentation. */
+export function toIndiaIsoString(date: Date): string {
+  const ist = new Date(date.getTime() + 330 * 60 * 1000);
+  return `${ist.toISOString().slice(0, 19)}+05:30`;
 }
 
 export interface CashfreeOrderResponse {
@@ -138,6 +152,7 @@ export async function createCashfreeOrder(params: CreateOrderParams): Promise<Ca
       return_url: params.returnUrl,
     },
     order_note: params.orderNote || 'SchoolBite Meal Order',
+    order_expiry_time: toIndiaIsoString(params.expiresAt || new Date(Date.now() + CHECKOUT_EXPIRY_MINUTES * 60 * 1000)),
   };
 
   if (params.notifyUrl) {
@@ -272,6 +287,8 @@ export function paymentDetailsFromCashfree(verified: VerifiedCashfreePayment) {
     cardLastFour: pay.payment_method?.card?.card_number ? String(pay.payment_method.card.card_number).slice(-4) : null,
     bankName: pay.payment_method?.netbanking?.netbanking_bank_name || null,
     cashfreeOrderId: verified.cfOrderId,
+    // When the customer actually completed the payment (not when we heard about it).
+    paidAt: pay.payment_completion_time || pay.payment_time || null,
   };
 }
 

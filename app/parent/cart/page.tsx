@@ -25,6 +25,39 @@ import VegBadge from '@/components/VegBadge';
 import MealIcon from '@/components/MealIcon';
 import { formatINR, formatDatePretty } from '@/lib/utils';
 
+const CHECKOUT_KEY_STORAGE = 'sb_checkout_key';
+
+function checkoutSignature(items: Array<{ studentId: string; mealId: string; date: string; quantity: number }>, notes: string) {
+  const lines = items.map((i) => `${i.studentId}|${i.mealId}|${i.date}|${i.quantity}`).sort();
+  return `${lines.join(';')}#${notes.trim()}`;
+}
+
+/** Same cart -> same key (so retries never create a second payment); `fresh` starts a new checkout. */
+function checkoutKeyFor(signature: string, fresh = false): string {
+  try {
+    const stored = JSON.parse(sessionStorage.getItem(CHECKOUT_KEY_STORAGE) || 'null');
+    if (!fresh && stored?.signature === signature && typeof stored.key === 'string') return stored.key;
+  } catch {
+    // storage unavailable: fall through to a new key
+  }
+  const random = typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : `${Math.random()}`.slice(2);
+  const key = `CHK-${Date.now()}-${random}`;
+  try {
+    sessionStorage.setItem(CHECKOUT_KEY_STORAGE, JSON.stringify({ signature, key }));
+  } catch {
+    // ignore
+  }
+  return key;
+}
+
+function forgetCheckoutKey() {
+  try {
+    sessionStorage.removeItem(CHECKOUT_KEY_STORAGE);
+  } catch {
+    // ignore
+  }
+}
+
 export default function CartPage() {
   const router = useRouter();
   const { cartItems, updateQuantity, removeFromCart, clearCart, subtotal, totalItems } = useCart();
@@ -158,20 +191,28 @@ export default function CartPage() {
     setProcessing(true);
 
     try {
-      const idempotencyKey = `ORD-${Date.now()}-${Math.floor(100000 + Math.random() * 900000)}`;
+      // The same cart reuses the same checkout key, so pressing Pay again (or retrying after a
+      // network error) continues the existing payment instead of creating a second one.
+      const signature = checkoutSignature(cartItems, notes);
+      const submit = (idempotencyKey: string) =>
+        fetch('/api/parent/orders', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            cartItems,
+            paymentMethod: 'UPI',
+            notes: notes.trim() || undefined,
+            idempotencyKey,
+          }),
+        });
 
-      const res = await fetch('/api/parent/orders', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          cartItems,
-          paymentMethod: 'UPI',
-          notes: notes.trim() || undefined,
-          idempotencyKey,
-        }),
-      });
-
-      const data = await res.json();
+      let res = await submit(checkoutKeyFor(signature));
+      let data = await res.json();
+      if (res.status === 409 && data.code === 'CHECKOUT_EXPIRED') {
+        // The previous payment window closed unpaid: start a new one.
+        res = await submit(checkoutKeyFor(signature, true));
+        data = await res.json();
+      }
 
       if (!res.ok) {
         const errorText = data.error || 'Unable to create order. Please try again.';
@@ -210,12 +251,18 @@ export default function CartPage() {
                 showToast(result.error.message || 'Payment cancelled', 'error');
                 setProcessing(false);
               } else {
-                // Completed inside modal or redirected
-                clearCart();
+                // Completed inside modal or redirected: the confirmation page verifies with Cashfree.
+                // The checkout key is kept until that page sees the payment confirmed, so paying
+                // again for this cart while a UPI payment is still pending reopens the same payment.
                 refreshUser().catch(() => {});
                 showToast('Payment submitted! Verifying order...', 'success');
                 router.push(`/parent/confirmation/${data.orderId}`);
               }
+            })
+            .catch(() => {
+              // The payment window failed; the server still knows this checkout, so it is safe to retry.
+              setErrorMessage('The payment window closed unexpectedly. If you paid, check My Orders before trying again.');
+              setProcessing(false);
             });
           return;
         } catch (sdkErr: any) {
@@ -227,10 +274,10 @@ export default function CartPage() {
         }
       }
 
-      // Fallback for direct confirmation (e.g. if Cashfree disabled)
-      clearCart();
+      // No payment needed now: an earlier attempt for this cart was already paid, or mock mode.
+      forgetCheckoutKey();
       refreshUser().catch(() => {});
-      showToast('Order confirmed!', 'success');
+      showToast(data.alreadyPaid ? 'This order was already paid. Showing its status...' : 'Order submitted!', 'success');
       router.push(`/parent/confirmation/${data.orderId}`);
     } catch {
       setErrorMessage('A network error occurred while connecting to payment gateway. Please retry.');

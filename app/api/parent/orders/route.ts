@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import prisma from '@/lib/prisma';
 import { getCurrentUser } from '@/lib/auth';
 import { isDeadlinePassed } from '@/lib/utils';
+import { getStudentCategory } from '@/lib/october-2026-timetable';
 import { CartItem, PaymentMethod } from '@/types';
 import { evaluateAllergyConflict, getSystemSetting } from '@/lib/allergy';
 import { db } from '@/lib/firebase-admin';
@@ -11,14 +12,17 @@ import {
   getAppBaseUrl,
   getCashfreeMode,
   getCashfreeOrder,
+  getVerifiedCashfreePayment,
   isCashfreeConfigured,
   isMockPaymentAllowed,
+  paymentDetailsFromCashfree,
   PaymentConfigError,
 } from '@/lib/cashfree';
 import { normalizeIndianMobile } from '@/lib/phone';
 import { savePendingParentOrder, fulfillParentOrder, generateParentOrderId } from '@/lib/order-fulfillment';
 import { cancelOrderWithRefund, OrderCancellationError } from '@/lib/order-cancellation';
-import { refundPaymentException } from '@/lib/payment-exceptions';
+import { isAutoRefundReason, listOwnPaymentIssues, refundPaymentException } from '@/lib/payment-exceptions';
+import { serviceStatusFor } from '@/lib/service-dates';
 import { validateCartAvailability } from '@/lib/availability';
 
 export const runtime = 'nodejs';
@@ -36,7 +40,59 @@ function currentCashfreeMode(): string | null {
  * Response for a repeated checkout submission, or null if nothing exists yet for this order ID.
  * Records belonging to a different parent are never returned.
  */
-async function existingCheckoutResponse(orderId: string, parentId: string): Promise<NextResponse | null> {
+/**
+ * A repeated submission of an unpaid checkout. Before handing back the same payment session:
+ * - if Cashfree says it was already paid, confirm the order instead of charging again;
+ * - if the gateway cannot be reached, refuse rather than start a second payment;
+ * - if the session expired, tell the client to start a fresh checkout (CHECKOUT_EXPIRED);
+ * - if a meal is no longer available, refuse with the reason.
+ * Returns null when the existing session can be reused.
+ */
+async function revalidatePendingCheckout(orderId: string, pendingData: any): Promise<NextResponse | null> {
+  if (pendingData.status === 'PAYMENT_EXCEPTION') {
+    return NextResponse.json(
+      { error: 'Your payment for this order is being reviewed. Please check your orders before paying again.', code: 'PAYMENT_EXCEPTION', orderId },
+      { status: 409 }
+    );
+  }
+
+  if (pendingData.paymentSessionId && isCashfreeConfigured()) {
+    let verified;
+    try {
+      verified = await getVerifiedCashfreePayment(orderId);
+    } catch {
+      return NextResponse.json(
+        { error: 'We could not confirm your previous payment attempt. Please wait a moment and try again.', code: 'PAYMENT_CHECK_FAILED' },
+        { status: 503 }
+      );
+    }
+    if (verified.paid) {
+      const result = await fulfillParentOrder(orderId, paymentDetailsFromCashfree(verified));
+      if (!result.success && isAutoRefundReason(result.reason) && result.exceptionRecorded) {
+        await refundPaymentException(orderId).catch((err) => console.error('[Checkout Retry] Refund request failed:', err?.message));
+      }
+      // No new payment session: the client goes to the confirmation page for this order.
+      return NextResponse.json({ success: true, orderId, isDuplicateSubmission: true, alreadyPaid: true, totalAmount: pendingData.totalAmount });
+    }
+    if (verified.orderStatus !== 'ACTIVE') {
+      return NextResponse.json(
+        { error: 'Your previous payment attempt has expired. Please try again to start a new payment.', code: 'CHECKOUT_EXPIRED' },
+        { status: 409 }
+      );
+    }
+  }
+
+  const availability = await validateCartAvailability(pendingData.cartItems || []);
+  if (!availability.valid) {
+    return NextResponse.json(
+      { error: availability.errorMessage, unavailableItem: availability.firstUnavailableItem },
+      { status: 409 }
+    );
+  }
+  return null;
+}
+
+async function existingCheckoutResponse(orderId: string, parentId: string, revalidate = false): Promise<NextResponse | null> {
   const existingOrder = await prisma.order.findUnique({
     where: { id: orderId },
     include: {
@@ -70,6 +126,10 @@ async function existingCheckoutResponse(orderId: string, parentId: string): Prom
     if (pendingData?.parentId !== parentId) {
       return NextResponse.json({ error: 'This checkout request could not be processed. Please retry.' }, { status: 409 });
     }
+    if (revalidate) {
+      const outcome = await revalidatePendingCheckout(orderId, pendingData);
+      if (outcome) return outcome;
+    }
     return NextResponse.json({
       success: true,
       orderId,
@@ -85,9 +145,41 @@ async function existingCheckoutResponse(orderId: string, parentId: string): Prom
   return null;
 }
 
+/** Identifies a cart by its children, meals, dates and quantities. */
+function cartSignature(items: Array<{ studentId?: string; mealId?: string; date?: string; quantity?: number }>): string {
+  return items.map((i) => `${i.studentId}|${i.mealId}|${i.date}|${Number(i.quantity) || 1}`).sort().join(';');
+}
+
+/**
+ * Another unpaid checkout of this parent for exactly the same cart (a second tab or device, or a
+ * Pay click while a UPI payment is still pending). Its own payment window is returned instead of
+ * opening a second Cashfree order, so the same meals can never be paid for twice. Expired windows
+ * are ignored, so a parent whose payment failed can still start a new one.
+ */
+async function openCheckoutForSameCart(
+  parentId: string,
+  orderId: string,
+  items: Array<{ studentId?: string; mealId?: string; date?: string; quantity?: number }>
+): Promise<NextResponse | null> {
+  const signature = cartSignature(items);
+  const pending = await db.collection('pending_orders').where('parentId', '==', parentId).get();
+  for (const doc of pending.docs) {
+    const data = doc.data();
+    if (doc.id === orderId || !data.paymentSessionId || cartSignature(data.cartItems || []) !== signature) continue;
+    const response = await existingCheckoutResponse(doc.id, parentId, true);
+    if (!response) continue;
+    if (response.status === 409) {
+      const body = await response.clone().json().catch(() => ({}));
+      if (body.code === 'CHECKOUT_EXPIRED') continue;
+    }
+    return response;
+  }
+  return null;
+}
+
 export async function GET(req: Request) {
   try {
-    const user = await getCurrentUser();
+    const user = await getCurrentUser(req);
     if (!user || user.role !== 'PARENT' || !user.parentId) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
@@ -96,23 +188,33 @@ export async function GET(req: Request) {
     const limitParam = searchParams.get('limit');
     const take = limitParam ? Math.min(Math.max(parseInt(limitParam, 10) || 50, 1), 100) : 50;
 
-    const orders = await prisma.order.findMany({
-      where: {
-        parentId: user.parentId,
-        paymentStatus: 'PAID', // Strictly exclude incomplete or failed order attempts
-      },
-      take,
-      include: {
-        items: {
-          include: {
-            student: true,
-            meal: true,
-          },
+    // Paid orders plus cancelled ones with their refund state; never unpaid checkout attempts.
+    const VISIBLE_PAYMENT_STATUSES = ['PAID', 'REFUND_PENDING', 'REFUNDED', 'REFUND_FAILED'];
+    const include = {
+      items: {
+        include: {
+          student: true,
+          meal: true,
         },
-        payments: true,
       },
-      orderBy: { createdAt: 'desc' },
-    });
+      payments: true,
+    };
+    const singleId = searchParams.get('id');
+    let orders: any[];
+    if (singleId) {
+      const one = await prisma.order.findUnique({ where: { id: singleId }, include });
+      orders = one && one.parentId === user.parentId && VISIBLE_PAYMENT_STATUSES.includes(one.paymentStatus) ? [one] : [];
+    } else {
+      orders = await prisma.order.findMany({
+        where: {
+          parentId: user.parentId,
+          paymentStatus: { in: VISIBLE_PAYMENT_STATUSES },
+        },
+        take,
+        include,
+        orderBy: { createdAt: 'desc' },
+      });
+    }
 
     const formattedOrders = orders.map((order) => ({
       id: order.id,
@@ -122,7 +224,7 @@ export async function GET(req: Request) {
       orderStatus: order.orderStatus,
       notes: order.notes,
       createdAt: order.createdAt instanceof Date ? order.createdAt.toISOString() : new Date(order.createdAt).toISOString(),
-      items: (order.items || []).map((item) => ({
+      items: (order.items || []).map((item: any) => ({
         id: item.id,
         studentId: item.studentId,
         studentName: item.student?.name || 'Student',
@@ -135,13 +237,14 @@ export async function GET(req: Request) {
         mealImage: item.meal?.imageUrl || null,
         isVegetarian: Boolean(item.meal?.isVegetarian),
         date: item.date,
+        serviceStatus: serviceStatusFor(order, item.date),
         quantity: item.quantity,
         unitPrice: item.unitPrice,
         totalPrice: item.totalPrice,
         hasAllergyAlert: Boolean(item.hasAllergyAlert),
         conflictAllergens: item.conflictAllergens || null,
       })),
-      payments: (order.payments || []).map((p) => ({
+      payments: (order.payments || []).map((p: any) => ({
         id: p.id,
         orderId: p.orderId,
         amount: p.amount,
@@ -155,7 +258,10 @@ export async function GET(req: Request) {
       })),
     }));
 
-    return NextResponse.json({ orders: formattedOrders });
+    // Payments received that did not (yet) become an order: under review, refunded, etc.
+    const paymentIssues = singleId ? [] : await listOwnPaymentIssues(user.parentId);
+
+    return NextResponse.json({ orders: formattedOrders, paymentIssues });
   } catch (error) {
     console.error('Error fetching parent orders:', error);
     return NextResponse.json({ error: 'Failed to fetch orders' }, { status: 500 });
@@ -167,7 +273,7 @@ export async function POST(req: Request) {
   let requestKey: string | undefined = undefined;
   let lockToken: string | undefined = undefined;
   try {
-    const user = await getCurrentUser();
+    const user = await getCurrentUser(req);
     if (!user || user.role !== 'PARENT' || !user.parentId) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
@@ -226,7 +332,7 @@ export async function POST(req: Request) {
 
     // Check for duplicate submission of the same checkout
     if (hasIdempotencyKey) {
-      const duplicate = await existingCheckoutResponse(orderId, parentId);
+      const duplicate = await existingCheckoutResponse(orderId, parentId, true);
       if (duplicate) return duplicate;
     }
 
@@ -363,14 +469,8 @@ export async function POST(req: Request) {
     // The student category always comes from the student record, never from the client.
     const cartItemsWithCategory = cartItems.map((it) => {
       const student = parentStudentsMap.get(it.studentId);
-      const studentCategory =
-        student?.studentCategory ||
-        (student?.grade?.toLowerCase().includes('nursery') ||
-        student?.grade?.toLowerCase().includes('kg')
-          ? 'Pre-primary'
-          : parseInt(student?.grade || '1', 10) <= 5
-          ? 'Primary'
-          : 'Secondary');
+      // Same rule as the menu the parent was shown (/api/menu), so checkout never disagrees with it.
+      const studentCategory = getStudentCategory(student?.grade, student?.studentCategory);
       return {
         ...it,
         studentCategory,
@@ -528,6 +628,11 @@ export async function POST(req: Request) {
       );
     };
 
+    if (isCashfreeEnabled) {
+      const sameCart = await openCheckoutForSameCart(parentRecord.id, orderId, evaluatedCartItems);
+      if (sameCart) return sameCart;
+    }
+
     // Pre-gateway Lock Ownership Check: abort if another request reclaimed our expired lock
     if (!(await hasLockOwnership())) {
       return lockLostResponse();
@@ -626,7 +731,7 @@ export async function POST(req: Request) {
     });
 
     if (!fulfillRes.success) {
-      if (fulfillRes.reason === 'STOCK_UNAVAILABLE' && fulfillRes.exceptionRecorded) {
+      if (isAutoRefundReason(fulfillRes.reason) && fulfillRes.exceptionRecorded) {
         await refundPaymentException(orderId);
       }
       return NextResponse.json({ error: fulfillRes.message || 'Order could not be confirmed' }, { status: 409 });
@@ -664,12 +769,12 @@ export async function POST(req: Request) {
 
 export async function PATCH(req: Request) {
   try {
-    const user = await getCurrentUser();
+    const user = await getCurrentUser(req);
     if (!user || user.role !== 'PARENT' || !user.parentId) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
-    const { orderId } = await req.json().catch(() => ({}));
+    const { orderId, date } = await req.json().catch(() => ({}));
     if (!orderId || typeof orderId !== 'string') {
       return NextResponse.json({ error: 'Order ID is required' }, { status: 400 });
     }
@@ -734,6 +839,7 @@ export async function PATCH(req: Request) {
       orderId: order.id,
       parentId: user.parentId,
       cancelledBy: user.id,
+      serviceDate: typeof date === 'string' && date ? date : undefined,
     });
 
     try {

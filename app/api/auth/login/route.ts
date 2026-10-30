@@ -1,12 +1,26 @@
+import crypto from 'crypto';
 import { NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
 import prisma from '@/lib/prisma';
 import { comparePassword, hashPassword, createSessionToken, TOKEN_COOKIE_NAME } from '@/lib/auth';
 import { checkRateLimit, getClientIp } from '@/lib/rate-limiter';
+import { clearLoginFailures, getTrustedClientIp, loginLockRemainingMs, recordLoginFailure } from '@/lib/login-throttle';
 import { UserRole } from '@/types';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
+
+/**
+ * A bcrypt hash (same cost as real passwords) of a random value nobody knows. Unknown emails are
+ * checked against it so they take as long as a wrong password for a real account.
+ */
+const DUMMY_PASSWORD_HASH = '$2b$10$xghznrBGRB84bf2kaErBL.k3rZd4ids8W5QfXWmMrbf6YbvVuhD/u';
+
+/** Constant-time comparison for the configured staff/admin passwords. */
+function matchesSecret(input: unknown, secret: string): boolean {
+  const digest = (value: string) => crypto.createHash('sha256').update(value).digest();
+  return crypto.timingSafeEqual(digest(String(input ?? '')), digest(secret));
+}
 
 export async function OPTIONS() {
   return new NextResponse(null, {
@@ -60,13 +74,23 @@ export async function POST(req: Request) {
 
     const envAdminEmail = process.env.ADMIN_EMAIL?.trim().toLowerCase();
     const envAdminPass = process.env.ADMIN_PASS;
-    const isAdminEnvMatch = Boolean(envAdminEmail && envAdminPass && emailStr === envAdminEmail && password === envAdminPass);
+    const isAdminEnvMatch = Boolean(envAdminEmail && envAdminPass && emailStr === envAdminEmail && matchesSecret(password, envAdminPass));
 
     const envStaffEmail = process.env.STAFF_EMAIL?.trim().toLowerCase();
     const envStaffPass = process.env.STAFF_PASS;
-    const isStaffEnvMatch = Boolean(envStaffEmail && envStaffPass && emailStr === envStaffEmail && password === envStaffPass);
+    const isStaffEnvMatch = Boolean(envStaffEmail && envStaffPass && emailStr === envStaffEmail && matchesSecret(password, envStaffPass));
 
     step = '3_DATABASE_CHECK';
+    // Shared limit per account and client IP (works across server instances, unlike the per-IP
+    // limiter above). A lock from one network never blocks the same account on another.
+    const throttleIp = getTrustedClientIp(req);
+    if ((await loginLockRemainingMs(emailStr, throttleIp)) > 0) {
+      return NextResponse.json(
+        { error: 'Too many failed attempts. Please wait 15 minutes and try again.' },
+        { status: 429 }
+      );
+    }
+
     step = '4_USER_LOOKUP';
     let user: any = null;
     try {
@@ -143,11 +167,34 @@ export async function POST(req: Request) {
     }
 
     if (!user) {
+      // Same work as a wrong password, so response time does not reveal which emails have accounts.
+      await comparePassword(String(password), DUMMY_PASSWORD_HASH);
+      await recordLoginFailure(emailStr, throttleIp, redactedEmail);
       return NextResponse.json(
         { error: 'Invalid email or password' },
         { status: 401 }
       );
     }
+
+    // The password is checked before the role, so a wrong password never reveals which kind of
+    // account an email belongs to.
+    step = '5_PASSWORD_VERIFY';
+    let isValid = false;
+    if (isAdminEnvMatch || isStaffEnvMatch) {
+      isValid = true;
+    } else {
+      isValid = await comparePassword(String(password), user.passwordHash || DUMMY_PASSWORD_HASH);
+      if (!user.passwordHash) isValid = false;
+    }
+
+    if (!isValid) {
+      await recordLoginFailure(emailStr, throttleIp, redactedEmail);
+      return NextResponse.json(
+        { error: 'Invalid email or password' },
+        { status: 401 }
+      );
+    }
+    await clearLoginFailures(emailStr, throttleIp);
 
     // Role-specific enforcement if requestedRole is provided
     if (requestedRole === 'admin' && user.role !== 'ADMIN') {
@@ -161,21 +208,6 @@ export async function POST(req: Request) {
       return NextResponse.json(
         { error: 'Access denied: This login is reserved for Canteen Staff.' },
         { status: 403 }
-      );
-    }
-
-    step = '5_PASSWORD_VERIFY';
-    let isValid = false;
-    if (isAdminEnvMatch || isStaffEnvMatch) {
-      isValid = true;
-    } else if (user.passwordHash) {
-      isValid = await comparePassword(password, user.passwordHash);
-    }
-
-    if (!isValid) {
-      return NextResponse.json(
-        { error: 'Invalid email or password' },
-        { status: 401 }
       );
     }
 
@@ -262,25 +294,10 @@ export async function POST(req: Request) {
       stack: error instanceof Error ? error.stack : undefined,
     });
 
+    // Details stay in the server log above; the browser only gets a plain message.
     return NextResponse.json(
-      {
-        error: sanitizedError || 'An unexpected error occurred during login',
-        diagnostic: {
-          failedStep: step,
-          errorName,
-          errorCode: errorCode || null,
-          details: sanitizedError,
-        },
-      },
-      {
-        status: 500,
-        headers: {
-          'Content-Type': 'application/json',
-          'Cache-Control': 'no-store',
-          'x-auth-failed-step': step,
-          'x-auth-error-name': errorName,
-        },
-      }
+      { error: 'Login failed due to a server problem. Please try again shortly.' },
+      { status: 500, headers: { 'Cache-Control': 'no-store' } }
     );
   }
 }

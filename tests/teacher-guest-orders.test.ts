@@ -156,13 +156,14 @@ test('parents are still sent to the parent portal; signed-in staff keep ownershi
 test('an unpaid guest order is never fulfilled, and the confirmation shows nothing as paid', async () => {
   const { orderId, cookie } = await placeGuestOrder();
 
-  for (const status of ['ACTIVE', 'EXPIRED', 'TERMINATED']) {
+  for (const [status, state] of [['ACTIVE', 'PENDING'], ['EXPIRED', 'NOT_PAID'], ['TERMINATED', 'NOT_PAID']]) {
     cashfreeOrder = { order_status: status, order_amount: 240, order_currency: 'INR' };
     const res = await verify(orderId, { cookie });
     assert.equal(res.status, 200);
     const body = await res.json();
     assert.equal(body.verified, false);
-    assert.equal(body.paymentStatus, 'FAILED');
+    assert.equal(body.state, state, `${status} is reported as ${state}, never as paid`);
+    assert.match(body.message, state === 'PENDING' ? /Do not pay again/ : /not completed/);
   }
   assert.equal(fs.getDoc('teacher_orders', orderId), undefined);
   assert.equal((await fetchOrder(orderId, { cookie })).status, 404);
@@ -173,7 +174,9 @@ test('a paid amount that does not match the server total does not fulfil the ord
   cashfreeOrder = { order_status: 'PAID', order_amount: 1, order_currency: 'INR' };
 
   const res = await verify(orderId, { cookie });
-  assert.equal(res.status, 409);
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.state, 'EXCEPTION', 'reported as a received payment needing review, not as unpaid');
   assert.equal(fs.getDoc('teacher_orders', orderId), undefined);
   assert.equal(fs.getDoc('payment_exceptions', orderId)?.reason, 'AMOUNT_MISMATCH');
 });
@@ -234,7 +237,7 @@ test('staff and admin management endpoints still reject unauthenticated callers,
   const responses = await Promise.all([
     staffTeacherOrders.GET(get('/api/staff/teacher-orders')),
     staffTeacherOrders.PATCH(send('/api/staff/teacher-orders', 'PATCH')),
-    staffTeacherMenu.GET(),
+    staffTeacherMenu.GET(get('/api/staff/teacher-menu')),
     staffTeacherMenu.POST(send('/api/staff/teacher-menu', 'POST')),
     staffTeacherMenu.PUT(send('/api/staff/teacher-menu', 'PUT')),
     staffTeacherMenu.PATCH(send('/api/staff/teacher-menu', 'PATCH')),

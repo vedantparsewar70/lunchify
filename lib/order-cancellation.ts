@@ -8,6 +8,7 @@ import {
   isMockPaymentAllowed,
 } from './cashfree';
 import { collectMenuStockInTransaction } from './menu-stock';
+import { orderServiceDates, serviceStatesFor } from './service-dates';
 
 export type RefundPaymentStatus = 'REFUNDED' | 'REFUND_PENDING' | 'REFUND_FAILED';
 
@@ -37,6 +38,17 @@ export interface CancelOrderOptions {
   cancelledBy: string;
   /** Order statuses that may not be cancelled. */
   blockedStatuses?: string[];
+  /**
+   * An order that was ever handed over (collectedAt set) is not cancelled/refunded unless the
+   * caller explicitly allows it (admin decision), even if it was later reverted to active.
+   */
+  allowPreviouslyCollected?: boolean;
+  /**
+   * The caller asked to cancel only this service date. Refunds are per order (one refund ID per
+   * payment), so a single date of a multi-date order cannot be cancelled and refunded on its own;
+   * that request is refused and nothing changes. For a single-date order it is the whole order.
+   */
+  serviceDate?: string;
 }
 
 export interface CancelOrderResult {
@@ -171,24 +183,44 @@ export async function cancelOrderWithRefund(
       return { order, refundId, refundAmount, refundNeeded: retryRefund, alreadyCancelled: true, paymentStatus: String(order.paymentStatus) };
     }
 
-    if (blockedStatuses.includes(order.orderStatus)) {
+    const itemsSnap = await transaction.get(firestore.collection('orderItems').where('orderId', '==', orderId));
+    const items = itemsSnap.docs.map((d) => d.data());
+    const dates = orderServiceDates(items);
+    const states = serviceStatesFor(order, dates);
+
+    if (options.serviceDate && (dates.length > 1 || !dates.includes(options.serviceDate))) {
+      throw new OrderCancellationError(
+        dates.includes(options.serviceDate)
+          ? 'This order covers several days and is paid as one payment. Cancelling a single day is not supported yet, because partial refunds are not supported. Nothing was changed.'
+          : `This order has no meal on ${options.serviceDate}.`,
+        409
+      );
+    }
+    if (blockedStatuses.includes(order.orderStatus) || dates.some((d) => blockedStatuses.includes(states[d].status))) {
       throw new OrderCancellationError('Cannot cancel order that has already been prepared or collected');
     }
+    if (order.collectedAt && !options.allowPreviouslyCollected) {
+      throw new OrderCancellationError('This meal was already handed over. Only an administrator can cancel and refund it.', 403);
+    }
+    // A full refund of a multi-date order would also refund the days already served.
+    const servedDates = dates.filter((d) => states[d].collectedAt);
+    if (servedDates.length > 0 && servedDates.length < dates.length) {
+      throw new OrderCancellationError(
+        `Part of this order was already handed over (${servedDates.join(', ')}). Cancelling it would refund those meals too, and partial refunds are not supported yet. Nothing was changed.`,
+        409
+      );
+    }
 
-    const itemsSnap = await transaction.get(firestore.collection('orderItems').where('orderId', '==', orderId));
     const menuStock = await collectMenuStockInTransaction(
       transaction,
       firestore,
-      itemsSnap.docs.map((d) => {
-        const item = d.data();
-        return {
-          mealId: item.mealId,
-          date: item.date,
-          quantity: Number(item.quantity || 0),
-          studentCategory: item.studentCategory || null,
-          menuId: item.menuId || null,
-        };
-      })
+      items.map((item) => ({
+        mealId: item.mealId,
+        date: item.date,
+        quantity: Number(item.quantity || 0),
+        studentCategory: item.studentCategory || null,
+        menuId: item.menuId || null,
+      }))
     );
 
     // --- Writes ---

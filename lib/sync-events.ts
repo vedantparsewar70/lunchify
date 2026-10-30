@@ -7,10 +7,13 @@ export interface SyncVersions {
   timestamp: number;
 }
 
+// Versions start at 0, not at this server instance's start time: the shared Firestore document
+// is the source of truth, so every instance reports the same versions and clients do not see a
+// "change" merely because a request reached a different (newer) instance.
 let inMemoryVersions = {
-  menuVersion: Date.now(),
-  ordersVersion: Date.now(),
-  teacherOrdersVersion: Date.now(),
+  menuVersion: 0,
+  ordersVersion: 0,
+  teacherOrdersVersion: 0,
 };
 
 let lastFirestoreFetch = 0;

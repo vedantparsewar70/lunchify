@@ -3,7 +3,7 @@ import prisma from '@/lib/prisma';
 import { getCurrentUser } from '@/lib/auth';
 import { getSystemSetting, setSystemSetting } from '@/lib/allergy';
 
-export async function GET() {
+export async function GET(req: Request) {
   try {
     const allowAllergyOrders = await getSystemSetting('ALLOW_ALLERGY_ORDERS', 'true');
     return NextResponse.json({
@@ -19,7 +19,7 @@ export async function GET() {
 
 export async function POST(req: Request) {
   try {
-    const user = await getCurrentUser();
+    const user = await getCurrentUser(req);
     if (!user || user.role !== 'ADMIN') {
       return NextResponse.json({ error: 'Unauthorized: Admin access required' }, { status: 403 });
     }

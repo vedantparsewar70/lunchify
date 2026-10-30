@@ -6,9 +6,9 @@ import { cleanDoc, generateId } from '@/lib/firestore-db';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-export async function GET() {
+export async function GET(req: Request) {
   try {
-    const user = await getCurrentUser();
+    const user = await getCurrentUser(req);
     if (!user || (user.role !== 'STAFF' && user.role !== 'ADMIN')) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 403 });
     }
@@ -27,18 +27,18 @@ export async function GET() {
 
 export async function POST(req: Request) {
   try {
-    const user = await getCurrentUser();
+    const user = await getCurrentUser(req);
     if (!user || (user.role !== 'STAFF' && user.role !== 'ADMIN')) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 403 });
     }
 
-    const body = await req.json();
+    const body = await req.json().catch(() => ({}));
     const { name, price, category = 'LUNCH', isVegetarian = true, description } = body;
 
-    const cleanName = (name || '').trim();
-    const numPrice = parseFloat(price);
+    const cleanName = typeof name === 'string' ? name.trim() : '';
+    const numPrice = Number(price);
 
-    if (!cleanName || isNaN(numPrice) || numPrice <= 0) {
+    if (!cleanName || cleanName.length > 120 || price === '' || !Number.isFinite(numPrice) || numPrice <= 0 || numPrice > 10000) {
       return NextResponse.json({ error: 'Valid name and price (> 0) are required' }, { status: 400 });
     }
 
@@ -47,9 +47,9 @@ export async function POST(req: Request) {
     const meal = cleanDoc({
       id,
       name: cleanName,
-      description: (description || '').trim() || `${cleanName} - Freshly prepared for staff and teachers`,
-      category: (category || 'LUNCH').toUpperCase().trim(),
-      price: numPrice,
+      description: (typeof description === 'string' ? description.trim() : '') || `${cleanName} - Freshly prepared for staff and teachers`,
+      category: String(category || 'LUNCH').toUpperCase().trim(),
+      price: Math.round(numPrice * 100) / 100,
       isVegetarian: Boolean(isVegetarian),
       isAvailable: true,
       createdAt: now,
@@ -74,7 +74,7 @@ export async function POST(req: Request) {
 
 export async function PUT(req: Request) {
   try {
-    const user = await getCurrentUser();
+    const user = await getCurrentUser(req);
     if (!user || (user.role !== 'STAFF' && user.role !== 'ADMIN')) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 403 });
     }
@@ -92,12 +92,23 @@ export async function PUT(req: Request) {
       return NextResponse.json({ error: 'Meal not found' }, { status: 404 });
     }
 
+    if (name !== undefined && (typeof name !== 'string' || !name.trim() || name.trim().length > 120)) {
+      return NextResponse.json({ error: 'Name must be 1-120 characters' }, { status: 400 });
+    }
+    const numPrice = Number(price);
+    if (price !== undefined && (price === null || price === '' || !Number.isFinite(numPrice) || numPrice <= 0 || numPrice > 10000)) {
+      return NextResponse.json({ error: 'Price must be a number greater than 0' }, { status: 400 });
+    }
+    if (description !== undefined && description !== null && typeof description !== 'string') {
+      return NextResponse.json({ error: 'Invalid description' }, { status: 400 });
+    }
+
     const updates: any = { updatedAt: new Date().toISOString() };
     if (name) updates.name = name.trim();
-    if (price !== undefined && !isNaN(parseFloat(price))) updates.price = parseFloat(price);
+    if (price !== undefined) updates.price = Math.round(numPrice * 100) / 100;
     if (category) updates.category = category.toUpperCase().trim();
     if (isVegetarian !== undefined) updates.isVegetarian = Boolean(isVegetarian);
-    if (description !== undefined) updates.description = description.trim();
+    if (typeof description === 'string') updates.description = description.trim();
     if (isAvailable !== undefined) updates.isAvailable = Boolean(isAvailable);
 
     await ref.update(cleanDoc(updates));
@@ -120,7 +131,7 @@ export async function PUT(req: Request) {
 
 export async function PATCH(req: Request) {
   try {
-    const user = await getCurrentUser();
+    const user = await getCurrentUser(req);
     if (!user || (user.role !== 'STAFF' && user.role !== 'ADMIN')) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 403 });
     }
@@ -154,7 +165,7 @@ export async function PATCH(req: Request) {
 
 export async function DELETE(req: Request) {
   try {
-    const user = await getCurrentUser();
+    const user = await getCurrentUser(req);
     if (!user || (user.role !== 'STAFF' && user.role !== 'ADMIN')) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 403 });
     }

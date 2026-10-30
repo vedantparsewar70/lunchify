@@ -6,9 +6,9 @@ import { getTodayString, getOffsetDateString, APP_TIMEZONE } from '@/lib/utils';
 let cachedStats: { data: any; timestamp: number } | null = null;
 const CACHE_TTL_MS = 15000;
 
-export async function GET() {
+export async function GET(req: Request) {
   try {
-    const user = await getCurrentUser();
+    const user = await getCurrentUser(req);
     if (!user || (user.role !== 'ADMIN' && user.role !== 'STAFF')) {
       return NextResponse.json({ error: 'Unauthorized: Admin or Staff access required' }, { status: 403 });
     }
@@ -21,14 +21,6 @@ export async function GET() {
 
     const todayStr = getTodayString(APP_TIMEZONE);
     const tomorrowStr = getOffsetDateString(1, APP_TIMEZONE);
-
-    // Ensure unconfirmed tomorrow menus are reset before computing stats
-    try {
-      const { ensureTomorrowMenuReset } = await import('@/lib/menu-schedule');
-      await ensureTomorrowMenuReset(tomorrowStr);
-    } catch {
-      // ignore
-    }
 
     // Run all dashboard queries in parallel with Promise.all for sub-second responses
     const [tomorrowMenus, tomorrowItems, todayItems, allActiveOrders, recentOrders] = await Promise.all([

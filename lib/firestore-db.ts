@@ -1665,6 +1665,11 @@ export class FirestoreDbAdapter {
       return docData(await ref.get());
     },
     count: async ({ where }: any = {}): Promise<number> => {
+      // Honour the mealId filter: callers ask "does this meal have orders?", not "are there any orders?".
+      if (where?.mealId) {
+        const snap = await db.collection('orderItems').where('mealId', '==', where.mealId).limit(1).get();
+        return snap.size;
+      }
       const snap = await db.collection('orderItems').count().get();
       return snap.data().count;
     },
@@ -1680,10 +1685,22 @@ export class FirestoreDbAdapter {
   // Payment
   payment = {
     findMany: async ({ where, include, orderBy }: any = {}): Promise<DbPayment[]> => {
-      let query: Query = db.collection('payments');
-      if (where?.orderId) query = query.where('orderId', '==', where.orderId);
-      const snap = await query.get();
-      let list = snap.docs.map((d) => docData(d));
+      let list: DbPayment[];
+      if (!where?.orderId && where?.order?.parentId) {
+        // One parent's payments: read that parent's orders first instead of every payment.
+        const ordersSnap = await db.collection('orders').where('parentId', '==', where.order.parentId).get();
+        const orderIds = ordersSnap.docs.map((d) => d.id);
+        list = [];
+        for (let i = 0; i < orderIds.length; i += 30) {
+          const chunk = await db.collection('payments').where('orderId', 'in', orderIds.slice(i, i + 30)).get();
+          list.push(...chunk.docs.map((d) => docData(d)));
+        }
+      } else {
+        let query: Query = db.collection('payments');
+        if (where?.orderId) query = query.where('orderId', '==', where.orderId);
+        const snap = await query.get();
+        list = snap.docs.map((d) => docData(d));
+      }
 
       if ((where?.order?.parentId || include?.order) && list.length > 0) {
         const orderIds = list.map((p) => p.orderId);

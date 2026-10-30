@@ -11,6 +11,7 @@ delete process.env.ALLOW_MOCK_PAYMENTS;
 delete process.env.NEXT_PUBLIC_APP_URL;
 delete process.env.VERCEL_ENV;
 delete process.env.VERCEL_URL;
+delete process.env.VERCEL;
 process.env.JWT_SECRET = 'test-only-jwt-secret-with-at-least-32-characters';
 (process.env as Record<string, string>).NODE_ENV = 'test';
 

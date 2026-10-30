@@ -18,19 +18,50 @@ import type { CashfreeRefund } from './cashfree';
 export const PAYMENT_EXCEPTIONS = 'payment_exceptions';
 
 /**
- * NOT_REQUESTED  sold-out payment, refund not yet requested
- * MANUAL_REVIEW  amount mismatch: an admin decides before any refund
+ * NOT_REQUESTED  sold-out payment, refund not yet requested (requested automatically)
+ * MANUAL_REVIEW  an admin decides before any refund: paid after the cutoff, meal no longer served
+ *                (holiday/disabled), or amount mismatch
+ * ORDER_ACCEPTED an admin accepted the payment as an order (no refund; the order exists)
  * REFUND_PENDING refund requested, gateway has not confirmed it yet
  * REFUNDED       gateway confirmed the refund
  * REFUND_FAILED  request failed or gateway cancelled it; an admin can retry
+ *
+ * Only sold-out payments are refunded automatically (exactly once). Everything else waits for an
+ * admin; accepting and refunding are mutually exclusive transitions out of MANUAL_REVIEW.
  */
-export type ExceptionRefundState = 'NOT_REQUESTED' | 'MANUAL_REVIEW' | 'REFUND_PENDING' | 'REFUNDED' | 'REFUND_FAILED';
+export function isAutoRefundReason(reason: unknown): boolean {
+  return reason === 'STOCK_UNAVAILABLE';
+}
+
+/** Reasons an admin may resolve by accepting the payment as a normal order. */
+export function isAcceptableReason(reason: unknown): boolean {
+  return reason === 'PAID_AFTER_CUTOFF' || reason === 'SERVICE_UNAVAILABLE';
+}
+
+export type ExceptionReason = 'STOCK_UNAVAILABLE' | 'PAID_AFTER_CUTOFF' | 'SERVICE_UNAVAILABLE' | 'AMOUNT_MISMATCH';
+
+export type ExceptionRefundState =
+  | 'NOT_REQUESTED'
+  | 'MANUAL_REVIEW'
+  | 'ORDER_ACCEPTED'
+  | 'REFUND_PENDING'
+  | 'REFUNDED'
+  | 'REFUND_FAILED';
+
+export class PaymentReviewError extends Error {
+  status: number;
+  constructor(message: string, status = 409) {
+    super(message);
+    this.name = 'PaymentReviewError';
+    this.status = status;
+  }
+}
 
 export interface PaymentExceptionInput {
   orderId: string;
   orderType: 'PARENT' | 'TEACHER';
   ownerId: string | null;
-  reason: 'STOCK_UNAVAILABLE' | 'AMOUNT_MISMATCH';
+  reason: ExceptionReason;
   detail: string;
   expectedAmount: number;
   payment: { amount: number; currency?: string; transactionRef?: string; cashfreeOrderId?: string | null };
@@ -74,7 +105,7 @@ export function recordPaymentException(
         })
       ),
       refundId: refundIdForOrder(input.orderId),
-      refundState: (input.reason === 'STOCK_UNAVAILABLE' ? 'NOT_REQUESTED' : 'MANUAL_REVIEW') as ExceptionRefundState,
+      refundState: (isAutoRefundReason(input.reason) ? 'NOT_REQUESTED' : 'MANUAL_REVIEW') as ExceptionRefundState,
       createdAt: input.now,
       updatedAt: input.now,
     })
@@ -128,7 +159,7 @@ export interface ExceptionRefundResult {
  */
 export async function refundPaymentException(
   orderId: string,
-  options: { manual?: boolean } = {},
+  options: { manual?: boolean; actorId?: string } = {},
   firestore: Firestore = db,
   refunds: RefundClient = cashfreeRefunds
 ): Promise<ExceptionRefundResult> {
@@ -144,14 +175,24 @@ export async function refundPaymentException(
     const state = exception.refundState as ExceptionRefundState;
     const amount = Number(exception.paidAmount) || 0;
 
+    // An accepted payment became a normal order: it is never refunded from here (cancelling the
+    // order refunds it through the order's own refund flow).
     const claimable = options.manual
-      ? state !== 'REFUNDED'
-      : exception.reason === 'STOCK_UNAVAILABLE' && (state === 'NOT_REQUESTED' || isAbandonedAttempt(exception, Date.now()));
+      ? state !== 'REFUNDED' && state !== 'ORDER_ACCEPTED'
+      : isAutoRefundReason(exception.reason) && (state === 'NOT_REQUESTED' || isAbandonedAttempt(exception, Date.now()));
     if (!claimable || amount <= 0) {
       return { exception, amount, requested: false };
     }
 
-    transaction.update(ref, { refundState: 'REFUND_PENDING', gatewayRefundStatus: 'REQUESTED', refundRequestedAt: now, updatedAt: now });
+    transaction.update(ref, {
+      refundState: 'REFUND_PENDING',
+      gatewayRefundStatus: 'REQUESTED',
+      refundRequestedAt: now,
+      updatedAt: now,
+      ...(options.manual && state === 'MANUAL_REVIEW'
+        ? { resolution: 'REFUNDED_BY_ADMIN', reviewedBy: options.actorId || null, reviewedAt: now }
+        : {}),
+    });
     return { exception, amount, requested: true };
   });
 
@@ -182,7 +223,7 @@ export async function recordExceptionRefundOutcome(
     const snap = await transaction.get(ref);
     if (!snap.exists) return 'NOT_REQUESTED';
     const current = snap.data() || {};
-    if (current.refundId !== refundId || current.refundState === 'REFUNDED') {
+    if (current.refundId !== refundId || current.refundState === 'REFUNDED' || current.refundState === 'ORDER_ACCEPTED') {
       return current.refundState as ExceptionRefundState;
     }
     const refundState = outcome.paymentStatus as ExceptionRefundState;
@@ -217,4 +258,30 @@ export async function listPaymentExceptions(firestore: Firestore = db, limit = 2
     })
     .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')))
     .slice(0, limit);
+}
+
+/** What a parent sees for a payment that did not (yet) become an order. */
+export function parentIssueState(refundState: unknown): 'PENDING_REVIEW' | 'REFUND_PENDING' | 'REFUNDED' | 'REFUND_FAILED' | 'ORDER_ACCEPTED' {
+  if (refundState === 'MANUAL_REVIEW') return 'PENDING_REVIEW';
+  if (refundState === 'REFUNDED') return 'REFUNDED';
+  if (refundState === 'REFUND_FAILED') return 'REFUND_FAILED';
+  if (refundState === 'ORDER_ACCEPTED') return 'ORDER_ACCEPTED';
+  return 'REFUND_PENDING';
+}
+
+/** A parent's own payment exceptions (accepted ones are listed as normal orders instead). */
+export async function listOwnPaymentIssues(parentId: string, firestore: Firestore = db) {
+  const snap = await firestore.collection(PAYMENT_EXCEPTIONS).where('ownerId', '==', parentId).get();
+  return snap.docs
+    .map((d) => d.data())
+    .filter((e) => e.orderType === 'PARENT' && e.refundState !== 'ORDER_ACCEPTED')
+    .map((e) => ({
+      orderId: String(e.orderId),
+      reason: e.reason,
+      state: parentIssueState(e.refundState),
+      paidAmount: Number(e.paidAmount) || 0,
+      dates: Array.from(new Set((e.items || []).map((it: { date?: string | null }) => it.date).filter(Boolean))).sort(),
+      createdAt: e.createdAt || null,
+    }))
+    .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
 }

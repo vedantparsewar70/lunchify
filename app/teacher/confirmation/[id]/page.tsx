@@ -21,45 +21,51 @@ export default function TeacherConfirmationPage({ params }: { params: Promise<{ 
 
   const [order, setOrder] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  const [checking, setChecking] = useState(false);
+  // PAID | PENDING | NOT_PAID | EXCEPTION | CANCELLED | NO_ACCESS (other device) | UNKNOWN (could not check)
+  const [state, setState] = useState('UNKNOWN');
+  const [message, setMessage] = useState('');
+  const [checks, setChecks] = useState(0);
+
+  const fetchOrder = async () => {
+    setChecking(true);
+    try {
+      const verifyRes = await fetch('/api/teacher/orders/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ orderId }),
+      }).catch(() => null);
+
+      const verifyData = verifyRes ? await verifyRes.json().catch(() => null) : null;
+      let nextState = 'UNKNOWN';
+      if (verifyRes?.ok) nextState = verifyData?.state || 'UNKNOWN';
+      else if (verifyRes?.status === 401 || verifyRes?.status === 404) nextState = 'NO_ACCESS';
+      setState(nextState);
+      setMessage(verifyData?.message || '');
+
+      if (nextState === 'PAID') {
+        const res = await fetch(`/api/teacher/orders/${orderId}`);
+        if (res.ok) setOrder((await res.json()).order);
+      }
+    } catch (err) {
+      console.error('Failed to load teacher order:', err);
+    } finally {
+      setLoading(false);
+      setChecking(false);
+      setChecks((n) => n + 1);
+    }
+  };
 
   useEffect(() => {
-    const fetchOrder = async () => {
-      try {
-        // Also trigger verification in case redirect happened fast
-        const verifyRes = await fetch('/api/teacher/orders/verify', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ orderId }),
-        }).catch(() => null);
-
-        if (verifyRes && verifyRes.ok) {
-          const verifyData = await verifyRes.json();
-          if (verifyData.verified) {
-            const res = await fetch(`/api/teacher/orders/${orderId}`);
-            if (res.ok) {
-              const data = await res.json();
-              setOrder(data.order);
-              return;
-            }
-          }
-        }
-
-        const res = await fetch(`/api/teacher/orders/${orderId}`);
-        if (res.ok) {
-          const data = await res.json();
-          setOrder(data.order);
-        }
-      } catch (err) {
-        console.error('Failed to load teacher order:', err);
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    if (orderId) {
-      fetchOrder();
-    }
+    if (orderId) fetchOrder();
   }, [orderId]);
+
+  // Keep checking an unresolved payment for about two minutes.
+  useEffect(() => {
+    if ((state !== 'PENDING' && state !== 'UNKNOWN') || checks === 0 || checks >= 24) return;
+    const timer = setTimeout(fetchOrder, 5000);
+    return () => clearTimeout(timer);
+  }, [state, checks]);
 
   if (loading) {
     return (
@@ -72,34 +78,54 @@ export default function TeacherConfirmationPage({ params }: { params: Promise<{ 
     );
   }
 
-  const isPaid = order?.paymentStatus === 'PAID';
+  const isPaid = state === 'PAID' && order?.paymentStatus === 'PAID';
 
   if (!isPaid) {
+    const unresolved = state === 'PENDING' || state === 'UNKNOWN' || (state === 'PAID' && !order);
+    const view =
+      state === 'NOT_PAID'
+        ? { tone: 'rose', badge: 'Payment Not Completed', title: 'No Order Created', text: message || 'This payment was not completed, so no order was placed. If money was debited, your bank will reverse it automatically.' }
+        : state === 'EXCEPTION'
+        ? { tone: 'sky', badge: 'Payment Received', title: 'Order Needs Canteen Review', text: message || 'The canteen will review this payment.' }
+        : state === 'CANCELLED'
+        ? { tone: 'sky', badge: 'Cancelled', title: 'Order Cancelled', text: 'This order was cancelled by the canteen.' }
+        : state === 'NO_ACCESS'
+        ? { tone: 'amber', badge: 'Order Status', title: 'Open This Page on the Same Phone', text: 'Order details can only be shown on the device used to place the order. If you paid, the canteen has your order — please do not pay again. Ask the canteen counter with your name if unsure.' }
+        : { tone: 'amber', badge: 'Checking Payment', title: 'Confirming Your Payment', text: message || 'If you completed the payment, it can take a minute to confirm. Please do not pay again.' };
+    const toneClass = view.tone === 'rose' ? 'bg-rose-100 text-rose-600' : view.tone === 'sky' ? 'bg-sky-100 text-sky-600' : 'bg-amber-100 text-amber-600';
     return (
       <div className="min-h-screen bg-slate-50/70 py-8 px-4 flex items-center justify-center">
         <div className="max-w-md w-full bg-white rounded-3xl p-6 sm:p-8 shadow-xl border border-slate-200 space-y-6 text-center animate-in fade-in zoom-in-95 duration-200">
-          <div className="w-16 h-16 rounded-full bg-rose-100 text-rose-600 flex items-center justify-center mx-auto shadow-sm">
-            <AlertCircle className="w-9 h-9" />
+          <div className={`w-16 h-16 rounded-full flex items-center justify-center mx-auto shadow-sm ${toneClass}`}>
+            {unresolved ? <Clock className="w-9 h-9" /> : <AlertCircle className="w-9 h-9" />}
           </div>
           <div className="space-y-2">
-            <span className="text-[11px] font-extrabold uppercase tracking-widest text-rose-700 bg-rose-50 px-2.5 py-0.5 rounded-full inline-flex items-center gap-1">
-              <span>Payment Incomplete</span>
+            <span className="text-[11px] font-extrabold uppercase tracking-widest text-slate-700 bg-slate-100 px-2.5 py-0.5 rounded-full inline-flex items-center gap-1">
+              <span>{view.badge}</span>
             </span>
-            <h1 className="text-xl sm:text-2xl font-black text-slate-900 tracking-tight">
-              No Order Created
-            </h1>
-            <p className="text-xs text-slate-500 font-medium">
-              The payment was not completed or was cancelled. Strictly no order was placed with the canteen.
-            </p>
+            <h1 className="text-xl sm:text-2xl font-black text-slate-900 tracking-tight">{view.title}</h1>
+            <p className="text-sm text-slate-600 font-medium">{view.text}</p>
+            <p className="text-xs text-slate-400">Order ID: {orderId}</p>
           </div>
-          <div className="pt-2">
-            <Link
-              href="/teacher/menu"
-              className="w-full py-3 px-4 bg-amber-500 hover:bg-amber-600 text-white font-bold text-xs rounded-xl transition-all flex items-center justify-center gap-2 cursor-pointer shadow-md"
-            >
-              <span>Return to Menu & Retry</span>
-              <ArrowRight className="w-3.5 h-3.5" />
-            </Link>
+          <div className="pt-2 space-y-2">
+            {unresolved && (
+              <button
+                onClick={fetchOrder}
+                disabled={checking}
+                className="w-full py-3 px-4 bg-amber-500 hover:bg-amber-600 text-white font-bold text-sm rounded-xl transition-all cursor-pointer shadow-md disabled:opacity-60"
+              >
+                {checking ? 'Checking…' : 'Check Payment Status'}
+              </button>
+            )}
+            {state === 'NOT_PAID' && (
+              <Link
+                href="/teacher/menu"
+                className="w-full py-3 px-4 bg-amber-500 hover:bg-amber-600 text-white font-bold text-sm rounded-xl transition-all flex items-center justify-center gap-2 cursor-pointer shadow-md"
+              >
+                <span>Back to Teacher Menu</span>
+                <ArrowRight className="w-4 h-4" />
+              </Link>
+            )}
           </div>
         </div>
       </div>

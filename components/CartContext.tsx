@@ -2,6 +2,7 @@
 
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { CartItem } from '@/types';
+import { useAuth } from '@/components/AuthContext';
 
 interface CartContextType {
   cartItems: CartItem[];
@@ -24,10 +25,12 @@ const CartContext = createContext<CartContextType>({
 });
 
 const CART_STORAGE_KEY = 'schoolbite_cart';
+const CART_OWNER_STORAGE_KEY = 'schoolbite_cart_owner';
 
 export function CartProvider({ children }: { children: React.ReactNode }) {
   const [cartItems, setCartItems] = useState<CartItem[]>([]);
   const [isLoaded, setIsLoaded] = useState(false);
+  const { user } = useAuth();
 
   useEffect(() => {
     try {
@@ -51,6 +54,33 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
       }
     }
   }, [cartItems, isLoaded]);
+
+  // A cart belongs to the account that filled it: on a shared phone, the next parent who signs in
+  // must not see (or try to pay for) the previous parent's children and meals. Checked once per
+  // signed-in account, while rendering, so the old cart is never shown.
+  const [checkedOwnerId, setCheckedOwnerId] = useState<string | null>(null);
+  if (isLoaded && user?.id && user.id !== checkedOwnerId) {
+    setCheckedOwnerId(user.id);
+    let owner: string | null = null;
+    try {
+      owner = localStorage.getItem(CART_OWNER_STORAGE_KEY);
+    } catch {
+      // storage unavailable: nothing persisted to leak
+    }
+    if (owner && owner !== user.id) setCartItems([]);
+  }
+
+  useEffect(() => {
+    if (!checkedOwnerId) return;
+    try {
+      if (localStorage.getItem(CART_OWNER_STORAGE_KEY) !== checkedOwnerId) {
+        sessionStorage.removeItem('sb_checkout_key');
+        localStorage.setItem(CART_OWNER_STORAGE_KEY, checkedOwnerId);
+      }
+    } catch {
+      // ignore
+    }
+  }, [checkedOwnerId]);
 
   const addToCart = (item: Omit<CartItem, 'cartItemId'>) => {
     const key = `${item.studentId}-${item.mealId}-${item.date}`;

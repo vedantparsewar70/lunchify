@@ -26,7 +26,7 @@ import prisma from '../lib/prisma';
 import { db } from '../lib/firebase-admin';
 import { getTodayString, getOffsetDateString, APP_TIMEZONE, isDeadlinePassed } from '../lib/utils';
 import { validateCartAvailability } from '../lib/availability';
-import { ensureTomorrowMenuReset, recordMenuPublication, getMenuPublishStatus } from '../lib/menu-schedule';
+import { recordMenuPublication, getMenuPublishStatus } from '../lib/menu-schedule';
 import { createSessionToken } from '../lib/auth';
 
 async function runRegressionSuite() {
@@ -327,16 +327,13 @@ async function runRegressionSuite() {
     const beforeResetSnap = await db.collection('menus').doc(`${testMealAId}_${unpubDate}`).get();
     const isActiveBefore = beforeResetSnap.data()?.isActive === true;
 
-    // Execute server-side reset
-    const resetExec = await ensureTomorrowMenuReset(unpubDate);
-
-    // Verify after state: record must now be isActive: false!
+    // Menus scheduled in advance are no longer switched off automatically (no midnight reset).
     const afterResetSnap = await db.collection('menus').doc(`${testMealAId}_${unpubDate}`).get();
-    const isActiveAfter = afterResetSnap.data()?.isActive === false;
+    const isActiveAfter = afterResetSnap.data()?.isActive === true;
 
     assert(
-      isActiveBefore && isActiveAfter && resetExec.deactivatedCount >= 1,
-      '10. Midnight reset genuinely transitions un-published active records to inactive in the database.'
+      isActiveBefore && isActiveAfter,
+      '10. A menu scheduled in advance stays active without a same-day publication record.'
     );
 
     // Clean up unpubDate record

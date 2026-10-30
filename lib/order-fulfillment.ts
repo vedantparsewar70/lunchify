@@ -1,9 +1,16 @@
 import crypto from 'crypto';
-import type { Firestore } from 'firebase-admin/firestore';
+import type { Firestore, Transaction } from 'firebase-admin/firestore';
 import { db } from './firebase-admin';
 import { cleanDoc, generateId } from './firestore-db';
 import { collectMenuStockInTransaction } from './menu-stock';
-import { PAYMENT_EXCEPTIONS, recordPaymentException } from './payment-exceptions';
+import { isDeadlinePassed } from './utils';
+import {
+  isAcceptableReason,
+  PAYMENT_EXCEPTIONS,
+  PaymentReviewError,
+  recordPaymentException,
+  type ExceptionReason,
+} from './payment-exceptions';
 
 export interface PendingParentOrder {
   id: string;
@@ -50,13 +57,15 @@ export interface VerifiedPaymentDetails {
   cardLastFour?: string | null;
   bankName?: string | null;
   cashfreeOrderId?: string | null;
+  /** Gateway time the payment completed (ISO). Service-date rules are judged at this moment. */
+  paidAt?: string | null;
 }
 
 export interface FulfillmentResult {
   success: boolean;
   orderId: string;
   alreadyFulfilled?: boolean;
-  reason?: 'AMOUNT_MISMATCH' | 'STOCK_UNAVAILABLE' | 'ORDER_NOT_PAYABLE';
+  reason?: ExceptionReason | 'ORDER_NOT_PAYABLE';
   message?: string;
   /** A payment exception exists for this order (see lib/payment-exceptions.ts). */
   exceptionRecorded?: boolean;
@@ -113,6 +122,120 @@ export async function savePendingTeacherOrder(data: PendingTeacherOrder): Promis
     updatedAt: new Date().toISOString(),
   });
   await db.collection('pending_teacher_orders').doc(data.id).set(doc);
+}
+
+function paymentCompletedAt(payment: VerifiedPaymentDetails): Date {
+  const parsed = payment.paidAt ? new Date(payment.paidAt) : null;
+  return parsed && Number.isFinite(parsed.getTime()) ? parsed : new Date();
+}
+
+/**
+ * Why a paid menu line can no longer be served automatically at `paidAt`, or null if it can.
+ * PAID_AFTER_CUTOFF: the payment completed after that date's ordering deadline.
+ * SERVICE_UNAVAILABLE: the date became a holiday, or the menu was disabled or removed.
+ */
+export function serviceProblem(
+  menu: { date?: string; isActive?: boolean; isHoliday?: boolean; orderingDeadline?: string } | undefined,
+  paidAt: Date
+): { reason: 'PAID_AFTER_CUTOFF' | 'SERVICE_UNAVAILABLE'; detail: string } | null {
+  if (!menu) return { reason: 'SERVICE_UNAVAILABLE', detail: 'menu not found' };
+  if (menu.isHoliday) return { reason: 'SERVICE_UNAVAILABLE', detail: 'the date is a holiday' };
+  if (menu.isActive === false) return { reason: 'SERVICE_UNAVAILABLE', detail: 'the menu was disabled by the canteen' };
+  if (menu.date && isDeadlinePassed(menu.date, menu.orderingDeadline || '08:30', paidAt)) {
+    return {
+      reason: 'PAID_AFTER_CUTOFF',
+      detail: `paid after the ${menu.orderingDeadline || '08:30'} ordering deadline for ${menu.date}`,
+    };
+  }
+  return null;
+}
+
+type MenuStockCheck = Awaited<ReturnType<typeof collectMenuStockInTransaction>>;
+
+function stockLines(
+  cartItems: Array<{ mealId: string; date: string; quantity?: number; studentCategory?: string | null; menuId?: string | null }>
+) {
+  return cartItems.map((item) => ({
+    mealId: item.mealId,
+    date: item.date,
+    quantity: Number(item.quantity || 1),
+    studentCategory: item.studentCategory || null,
+    menuId: item.menuId || null,
+  }));
+}
+
+/**
+ * Transaction writes that turn a paid checkout into an order: stock, order, items, payment record,
+ * and removal of the pending checkout. The caller has done all reads and checks.
+ */
+function writeParentOrder(
+  transaction: Transaction,
+  firestore: Firestore,
+  orderId: string,
+  pending: PendingParentOrder,
+  payment: VerifiedPaymentDetails,
+  menuStock: MenuStockCheck,
+  now: string,
+  extra: Record<string, unknown> = {}
+): void {
+  for (const s of menuStock.stock) {
+    transaction.update(s.ref, {
+      availableQuantity: s.available - s.required,
+      updatedAt: now,
+    });
+  }
+
+  const orderObj = cleanDoc({
+    id: orderId,
+    parentId: pending.parentId,
+    totalAmount: pending.totalAmount,
+    paymentStatus: 'PAID',
+    orderStatus: 'CONFIRMED',
+    cashfreeOrderId: payment.cashfreeOrderId || pending.cashfreeOrderId || null,
+    paymentSessionId: pending.paymentSessionId || null,
+    notes: pending.notes || null,
+    createdAt: now,
+    updatedAt: now,
+    ...extra,
+  });
+  transaction.set(firestore.collection('orders').doc(orderId), orderObj);
+
+  (pending.cartItems || []).forEach((item: any, index: number) => {
+    const itemId = generateId('oit_');
+    const itemObj = cleanDoc({
+      id: itemId,
+      orderId,
+      studentId: item.studentId,
+      studentCategory: item.studentCategory || null,
+      mealId: item.mealId,
+      menuId: menuStock.lineMenuIds[index],
+      date: item.date,
+      quantity: item.quantity,
+      unitPrice: item.mealPrice,
+      totalPrice: item.mealPrice * item.quantity,
+      hasAllergyAlert: Boolean(item.hasAllergyAlert),
+      conflictAllergens: item.conflictAllergens || null,
+      createdAt: now,
+    });
+    transaction.set(firestore.collection('orderItems').doc(itemId), itemObj);
+  });
+
+  const paymentId = generateId('PAY-');
+  const payObj = cleanDoc({
+    id: paymentId,
+    orderId,
+    amount: Number(payment.amount),
+    paymentMethod: payment.paymentMethod || pending.paymentMethod || 'UPI',
+    status: 'SUCCESS',
+    transactionRef: String(payment.transactionRef || payment.cashfreeOrderId || orderId),
+    upiId: payment.upiId || pending.upiId || null,
+    cardLastFour: payment.cardLastFour || pending.cardLastFour || null,
+    bankName: payment.bankName || pending.bankName || null,
+    createdAt: now,
+  });
+  transaction.set(firestore.collection('payments').doc(paymentId), payObj);
+
+  transaction.delete(firestore.collection('pending_orders').doc(orderId));
 }
 
 /**
@@ -185,19 +308,28 @@ export async function fulfillParentOrder(
       return { success: false, orderId, reason: 'AMOUNT_MISMATCH', message: mismatch, exceptionRecorded: true };
     }
 
-    const menuStock = await collectMenuStockInTransaction(
-      transaction,
-      firestore,
-      cartItems.map((item: any) => ({
-        mealId: item.mealId,
-        date: item.date,
-        quantity: Number(item.quantity || 1),
-        studentCategory: item.studentCategory || null,
-        menuId: item.menuId || null,
-      }))
-    );
+    const menuStock = await collectMenuStockInTransaction(transaction, firestore, stockLines(cartItems));
 
     // --- Writes ---
+    // The meal must still be servable when the payment completed: menu active, not a holiday,
+    // and paid before that date's ordering deadline. Otherwise the payment becomes an exception
+    // that an admin reviews (accept as an order, or refund); it is never refunded automatically.
+    const paidAt = paymentCompletedAt(payment);
+    const problem = menuStock.stock.map((s) => serviceProblem(s.menu, paidAt)).find(Boolean);
+    if (problem) {
+      recordPaymentException(transaction, exceptionRef, pendingRef, {
+        orderId, orderType: 'PARENT', ownerId: pending.parentId, reason: problem.reason, detail: problem.detail,
+        expectedAmount: pending.totalAmount, payment, cashfreeOrderId: pending.cashfreeOrderId, items: cartItems, now,
+      });
+      return {
+        success: false,
+        orderId,
+        reason: problem.reason,
+        message: `Payment received, but the order needs review by the canteen (${problem.detail}).`,
+        exceptionRecorded: true,
+      };
+    }
+
     const insufficient =
       menuStock.unresolved.length > 0 || menuStock.stock.some((s) => s.available < s.required);
     if (insufficient) {
@@ -217,64 +349,7 @@ export async function fulfillParentOrder(
       };
     }
 
-    for (const s of menuStock.stock) {
-      transaction.update(s.ref, {
-        availableQuantity: s.available - s.required,
-        updatedAt: now,
-      });
-    }
-
-    const orderObj = cleanDoc({
-      id: orderId,
-      parentId: pending.parentId,
-      totalAmount: pending.totalAmount,
-      paymentStatus: 'PAID',
-      orderStatus: 'CONFIRMED',
-      cashfreeOrderId: payment.cashfreeOrderId || pending.cashfreeOrderId || null,
-      paymentSessionId: pending.paymentSessionId || null,
-      notes: pending.notes || null,
-      createdAt: now,
-      updatedAt: now,
-    });
-    transaction.set(orderRef, orderObj);
-
-    cartItems.forEach((item: any, index: number) => {
-      const itemId = generateId('oit_');
-      const itemObj = cleanDoc({
-        id: itemId,
-        orderId,
-        studentId: item.studentId,
-        studentCategory: item.studentCategory || null,
-        mealId: item.mealId,
-        menuId: menuStock.lineMenuIds[index],
-        date: item.date,
-        quantity: item.quantity,
-        unitPrice: item.mealPrice,
-        totalPrice: item.mealPrice * item.quantity,
-        hasAllergyAlert: Boolean(item.hasAllergyAlert),
-        conflictAllergens: item.conflictAllergens || null,
-        createdAt: now,
-      });
-      transaction.set(firestore.collection('orderItems').doc(itemId), itemObj);
-    });
-
-    const paymentId = generateId('PAY-');
-    const payObj = cleanDoc({
-      id: paymentId,
-      orderId,
-      amount: Number(payment.amount),
-      paymentMethod: payment.paymentMethod || pending.paymentMethod || 'UPI',
-      status: 'SUCCESS',
-      transactionRef: String(payment.transactionRef || payment.cashfreeOrderId || orderId),
-      upiId: payment.upiId || pending.upiId || null,
-      cardLastFour: payment.cardLastFour || pending.cardLastFour || null,
-      bankName: payment.bankName || pending.bankName || null,
-      createdAt: now,
-    });
-    transaction.set(firestore.collection('payments').doc(paymentId), payObj);
-
-    transaction.delete(pendingRef);
-
+    writeParentOrder(transaction, firestore, orderId, pending, payment, menuStock, now);
     return { success: true, orderId };
   });
 
@@ -287,6 +362,80 @@ export async function fulfillParentOrder(
     }
   }
 
+  return result;
+}
+
+/**
+ * Admin decision on a payment under review (paid after the cutoff, or the meal is no longer
+ * served): accept it as a normal order. Runs in one transaction on the same exception document as
+ * the refund claim, so a payment is either accepted or refunded, never both. Stock is still enforced.
+ */
+export async function acceptPaymentException(
+  orderId: string,
+  actorId: string,
+  firestore: Firestore = db
+): Promise<{ orderId: string; alreadyAccepted: boolean }> {
+  const now = new Date().toISOString();
+  const exceptionRef = firestore.collection(PAYMENT_EXCEPTIONS).doc(orderId);
+  const orderRef = firestore.collection('orders').doc(orderId);
+  const pendingRef = firestore.collection('pending_orders').doc(orderId);
+
+  const result = await firestore.runTransaction(async (transaction) => {
+    const exceptionSnap = await transaction.get(exceptionRef);
+    const orderSnap = await transaction.get(orderRef);
+    const pendingSnap = await transaction.get(pendingRef);
+    if (!exceptionSnap.exists) throw new PaymentReviewError('Payment exception not found', 404);
+    const exception = exceptionSnap.data() || {};
+
+    if (exception.refundState === 'ORDER_ACCEPTED') return { orderId, alreadyAccepted: true };
+    if (exception.orderType !== 'PARENT' || !isAcceptableReason(exception.reason)) {
+      throw new PaymentReviewError('Only payments made after the cutoff or for a meal no longer served can be accepted as orders.');
+    }
+    if (exception.refundState !== 'MANUAL_REVIEW') {
+      throw new PaymentReviewError('A refund has already been requested for this payment, so it can no longer be accepted as an order.');
+    }
+    if (orderSnap.exists) throw new PaymentReviewError('An order already exists for this payment.');
+    if (!pendingSnap.exists) throw new PaymentReviewError('The checkout details for this payment are missing; refund it instead.');
+
+    const pending = pendingSnap.data() as PendingParentOrder;
+    const payment: VerifiedPaymentDetails = {
+      amount: Number(exception.paidAmount),
+      currency: exception.currency || 'INR',
+      transactionRef: exception.transactionRef || undefined,
+      cashfreeOrderId: exception.cashfreeOrderId || pending.cashfreeOrderId || null,
+    };
+    if (checkPaidAmount(payment, pending.totalAmount)) {
+      throw new PaymentReviewError('The paid amount does not match the order total; refund it instead.');
+    }
+
+    const menuStock = await collectMenuStockInTransaction(transaction, firestore, stockLines(pending.cartItems || []));
+    if (menuStock.unresolved.length > 0 || menuStock.stock.some((s) => s.available < s.required)) {
+      throw new PaymentReviewError('Not enough meals are left to accept this order; refund it instead.');
+    }
+
+    writeParentOrder(transaction, firestore, orderId, pending, payment, menuStock, now, {
+      acceptedFromReview: true,
+      acceptedBy: actorId,
+      acceptedAt: now,
+    });
+    transaction.update(exceptionRef, {
+      refundState: 'ORDER_ACCEPTED',
+      resolution: 'ACCEPTED_AS_ORDER',
+      reviewedBy: actorId,
+      reviewedAt: now,
+      updatedAt: now,
+    });
+    return { orderId, alreadyAccepted: false };
+  });
+
+  if (!result.alreadyAccepted) {
+    try {
+      const { notifyOrdersUpdated } = await import('@/lib/sync-events');
+      await notifyOrdersUpdated();
+    } catch {
+      // non-blocking
+    }
+  }
   return result;
 }
 

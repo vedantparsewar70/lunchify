@@ -2,7 +2,12 @@ import { NextResponse } from 'next/server';
 import prisma from '@/lib/prisma';
 import { getCurrentUser } from '@/lib/auth';
 
-export async function GET() {
+function isValidMealPrice(price: unknown): boolean {
+  const value = Number(price);
+  return price !== null && price !== '' && Number.isFinite(value) && value > 0 && value <= 10000;
+}
+
+export async function GET(req: Request) {
   try {
     const meals = await prisma.meal.findMany({
       include: {
@@ -41,7 +46,7 @@ export async function GET() {
 
 export async function POST(req: Request) {
   try {
-    const user = await getCurrentUser();
+    const user = await getCurrentUser(req);
     if (!user || (user.role !== 'ADMIN' && user.role !== 'STAFF')) {
       return NextResponse.json({ error: 'Unauthorized: Admin or Staff access required' }, { status: 403 });
     }
@@ -130,7 +135,7 @@ export async function POST(req: Request) {
 
 export async function PUT(req: Request) {
   try {
-    const user = await getCurrentUser();
+    const user = await getCurrentUser(req);
     if (!user || (user.role !== 'ADMIN' && user.role !== 'STAFF')) {
       return NextResponse.json({ error: 'Unauthorized: Admin or Staff access required' }, { status: 403 });
     }
@@ -153,11 +158,26 @@ export async function PUT(req: Request) {
       return NextResponse.json({ error: 'Meal ID is required' }, { status: 400 });
     }
 
+    if (price !== undefined && !isValidMealPrice(price)) {
+      return NextResponse.json({ error: 'Price must be a number greater than 0' }, { status: 400 });
+    }
+    if (name !== undefined && (typeof name !== 'string' || !name.trim())) {
+      return NextResponse.json({ error: 'Meal name cannot be empty' }, { status: 400 });
+    }
+
+    // Allergens are only replaced when the request explicitly carries them. A partial edit
+    // (e.g. price only) must never erase allergy information parents and the kitchen rely on.
+    const allergensSupplied = Array.isArray(allergensList) || typeof allergens === 'string';
     let finalAllergens: string[] = [];
     if (Array.isArray(allergensList)) {
-      finalAllergens = [...allergensList];
+      finalAllergens = allergensList.map((a: unknown) => String(a).trim()).filter(Boolean);
     } else if (typeof allergens === 'string') {
       finalAllergens = allergens.split(/[,;]/).map((a: string) => a.trim()).filter(Boolean);
+    }
+
+    const existing = await prisma.meal.findUnique({ where: { id } });
+    if (!existing) {
+      return NextResponse.json({ error: 'Meal not found' }, { status: 404 });
     }
 
     const updated = await prisma.meal.update({
@@ -168,16 +188,15 @@ export async function PUT(req: Request) {
         category: category !== undefined ? category.toUpperCase().trim() : undefined,
         isVegetarian: isVegetarian !== undefined ? Boolean(isVegetarian) : undefined,
         ingredients: ingredients !== undefined ? ingredients?.trim() || null : undefined,
-        allergens: finalAllergens.join(', ') || null,
+        allergens: allergensSupplied ? finalAllergens.join(', ') || null : undefined,
         calories: calories !== undefined ? (calories ? Number(calories) : null) : undefined,
         price: price !== undefined ? Number(price) : undefined,
-        imageUrl: null,
       },
     });
 
-    // Reset and sync meal_allergens relation
-    await prisma.mealAllergen.deleteMany({ where: { mealId: id } });
-    for (const alg of finalAllergens) {
+    // Reset and sync meal_allergens relation, only for an explicit allergen update
+    if (allergensSupplied) await prisma.mealAllergen.deleteMany({ where: { mealId: id } });
+    for (const alg of allergensSupplied ? finalAllergens : []) {
       if (!alg || alg.toLowerCase() === 'none') continue;
       const allergenRecord = await prisma.allergen.upsert({
         where: { name: alg },
@@ -209,7 +228,7 @@ export async function PUT(req: Request) {
 
 export async function DELETE(req: Request) {
   try {
-    const user = await getCurrentUser();
+    const user = await getCurrentUser(req);
     if (!user || user.role !== 'ADMIN') {
       return NextResponse.json({ error: 'Unauthorized: Admin access required' }, { status: 403 });
     }

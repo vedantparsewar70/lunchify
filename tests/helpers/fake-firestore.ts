@@ -63,6 +63,24 @@ export class FakeFirestore {
     this.collectionVersions.set(collection, version);
   }
 
+  async getAll(...refs: FakeDocRef[]) {
+    return Promise.all(refs.map((ref) => ref.get()));
+  }
+
+  /** Write batch: queued writes applied in order on commit (no read-conflict checks needed). */
+  batch() {
+    const ops: Array<() => Promise<void>> = [];
+    const api = {
+      set: (ref: FakeDocRef, data: Data, options?: { merge?: boolean }) => (ops.push(() => ref.set(data, options)), api),
+      update: (ref: FakeDocRef, data: Data) => (ops.push(() => ref.update(data)), api),
+      delete: (ref: FakeDocRef) => (ops.push(() => ref.delete()), api),
+      commit: async () => {
+        for (const op of ops) await op();
+      },
+    };
+    return api;
+  }
+
   async runTransaction<T>(fn: (tx: FakeTransaction) => Promise<T>): Promise<T> {
     for (let attempt = 0; attempt < 10; attempt++) {
       this.transactionAttempts++;
@@ -75,6 +93,10 @@ export class FakeFirestore {
     }
     throw new Error('Transaction failed: too much contention');
   }
+}
+
+function withoutUndefined(data: Data): Data {
+  return Object.fromEntries(Object.entries(data).filter(([, value]) => value !== undefined));
 }
 
 class FakeSnapshot {
@@ -103,13 +125,22 @@ class FakeDocRef {
   async get() {
     return new FakeSnapshot(this.id, this, this.store.read(this.collectionName, this.id)?.data);
   }
-  async set(data: Data) {
-    this.store.write(this.collectionName, this.id, data);
+  async set(data: Data, options?: { merge?: boolean }) {
+    // Like the app's Firestore settings (ignoreUndefinedProperties), undefined fields are skipped.
+    const defined = withoutUndefined(data);
+    const current = options?.merge ? this.store.read(this.collectionName, this.id)?.data : undefined;
+    this.store.write(this.collectionName, this.id, current ? { ...current, ...defined } : defined);
+  }
+  async create(data: Data) {
+    if (this.store.read(this.collectionName, this.id)) {
+      throw Object.assign(new Error(`6 ALREADY_EXISTS: Document already exists: ${this.path}`), { code: 6 });
+    }
+    this.store.write(this.collectionName, this.id, withoutUndefined(data));
   }
   async update(data: Data) {
     const current = this.store.read(this.collectionName, this.id);
     if (!current) throw new Error(`5 NOT_FOUND: No document to update: ${this.path}`);
-    this.store.write(this.collectionName, this.id, { ...current.data, ...data });
+    this.store.write(this.collectionName, this.id, { ...current.data, ...withoutUndefined(data) });
   }
   async delete() {
     this.store.write(this.collectionName, this.id, null);
@@ -120,11 +151,14 @@ class FakeQuery {
   constructor(
     protected store: FakeFirestore,
     public collectionName: string,
-    protected filters: [string, unknown][] = []
+    protected filters: [string, (v: unknown) => boolean][] = []
   ) {}
   where(field: string, op: string, value: unknown) {
-    if (op !== '==') throw new Error(`FakeFirestore only supports '==' filters (got ${op})`);
-    return new FakeQuery(this.store, this.collectionName, [...this.filters, [field, value]]);
+    let test: (v: unknown) => boolean;
+    if (op === '==') test = (v) => v === value;
+    else if (op === 'in' && Array.isArray(value)) test = (v) => value.includes(v);
+    else throw new Error(`FakeFirestore only supports '==' and 'in' filters (got ${op})`);
+    return new FakeQuery(this.store, this.collectionName, [...this.filters, [field, test]]);
   }
   limit(_count: number) {
     return this;
@@ -132,7 +166,8 @@ class FakeQuery {
   async get() {
     const docs = this.store
       .docsOf(this.collectionName)
-      .filter(([, entry]) => this.filters.every(([field, value]) => entry.data[field] === value))
+      // '__name__' is the document ID, as in Firestore.
+      .filter(([id, entry]) => this.filters.every(([field, test]) => test(field === '__name__' ? id : entry.data[field])))
       .map(([id, entry]) => new FakeSnapshot(id, new FakeDocRef(this.store, this.collectionName, id), entry.data));
     return { docs, empty: docs.length === 0, size: docs.length };
   }
@@ -146,7 +181,7 @@ class FakeCollection extends FakeQuery {
 
 type Write =
   | { kind: 'set'; ref: FakeDocRef; data: Data }
-  | { kind: 'update'; ref: FakeDocRef; data: Data }
+  | { kind: 'update'; ref: FakeDocRef; data: Data; upsert?: boolean }
   | { kind: 'delete'; ref: FakeDocRef };
 
 export class FakeTransaction {
@@ -169,8 +204,12 @@ export class FakeTransaction {
     return target.get();
   }
 
-  set(ref: FakeDocRef, data: Data) {
-    this.writes.push({ kind: 'set', ref, data: structuredClone(data) });
+  set(ref: FakeDocRef, data: Data, options?: { merge?: boolean }) {
+    if (options?.merge) {
+      this.writes.push({ kind: 'update', ref, data: structuredClone(withoutUndefined(data)), upsert: true } as Write);
+    } else {
+      this.writes.push({ kind: 'set', ref, data: structuredClone(withoutUndefined(data)) });
+    }
     return this;
   }
 
@@ -196,15 +235,15 @@ export class FakeTransaction {
 
   apply() {
     for (const w of this.writes) {
-      if (w.kind === 'update' && !this.store.read(w.ref.collectionName, w.ref.id)) {
+      if (w.kind === 'update' && !w.upsert && !this.store.read(w.ref.collectionName, w.ref.id)) {
         throw new Error(`5 NOT_FOUND: No document to update: ${w.ref.path}`);
       }
     }
     for (const w of this.writes) {
       if (w.kind === 'set') this.store.write(w.ref.collectionName, w.ref.id, w.data);
       else if (w.kind === 'update') {
-        const current = this.store.read(w.ref.collectionName, w.ref.id)!;
-        this.store.write(w.ref.collectionName, w.ref.id, { ...current.data, ...w.data });
+        const current = this.store.read(w.ref.collectionName, w.ref.id);
+        this.store.write(w.ref.collectionName, w.ref.id, { ...(current?.data || {}), ...w.data });
       } else this.store.write(w.ref.collectionName, w.ref.id, null);
     }
   }

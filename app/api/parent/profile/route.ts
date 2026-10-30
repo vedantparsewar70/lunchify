@@ -8,7 +8,7 @@ export const dynamic = 'force-dynamic';
 /** Updates the signed-in parent's mobile number (used for payment checkout). */
 export async function PATCH(req: Request) {
   try {
-    const user = await getCurrentUser();
+    const user = await getCurrentUser(req);
     const { phone } = await req.json().catch(() => ({}));
     const result = await updateOwnPhone(user, phone);
     if (!result.ok) {

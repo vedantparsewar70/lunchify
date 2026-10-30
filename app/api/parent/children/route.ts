@@ -5,9 +5,9 @@ import { getCurrentUser } from '@/lib/auth';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-export async function GET() {
+export async function GET(req: Request) {
   try {
-    const user = await getCurrentUser();
+    const user = await getCurrentUser(req);
     if (!user || user.role !== 'PARENT' || !user.parentId) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
@@ -89,7 +89,7 @@ export async function GET() {
 
 export async function POST(req: Request) {
   try {
-    const user = await getCurrentUser();
+    const user = await getCurrentUser(req);
     if (!user || user.role !== 'PARENT' || !user.parentId) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
@@ -218,7 +218,7 @@ export async function POST(req: Request) {
 
 export async function PUT(req: Request) {
   try {
-    const user = await getCurrentUser();
+    const user = await getCurrentUser(req);
     if (!user || user.role !== 'PARENT' || !user.parentId) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
@@ -252,6 +252,14 @@ export async function PUT(req: Request) {
     if (!student) {
       return NextResponse.json({ error: 'Student not found or unauthorized' }, { status: 404 });
     }
+
+    if (name !== undefined && !String(name ?? '').trim()) {
+      return NextResponse.json({ error: 'Student name cannot be empty' }, { status: 400 });
+    }
+
+    // Allergies are only replaced when the request includes them. The parent edit form does not
+    // send them, so an ordinary name or class edit must keep the allergies the school recorded.
+    const allergiesProvided = allergies !== undefined || allergiesList !== undefined || otherAllergy !== undefined;
 
     // Build unified allergies list
     let finalAllergies: string[] = [];
@@ -288,7 +296,7 @@ export async function PUT(req: Request) {
         division: division ? String(division).trim().toUpperCase() : student.division,
         rollNo: rollNo ? String(rollNo).trim() : student.rollNo,
         studentCategory: studentCategory || (student as any).studentCategory || 'Primary',
-        allergies: allergiesSummary || null,
+        allergies: allergiesProvided ? allergiesSummary || null : student.allergies,
         dietaryRestrictions: dietaryRestrictions !== undefined ? dietaryRestrictions?.trim() : student.dietaryRestrictions,
         foodPreference: foodPreference !== undefined ? foodPreference?.trim() : student.foodPreference,
         notes: notes !== undefined ? notes?.trim() : student.notes,
@@ -298,11 +306,11 @@ export async function PUT(req: Request) {
     });
 
     // Reset and sync student_allergies relation concurrently
-    await prisma.studentAllergy.deleteMany({ where: { studentId: id } });
+    if (allergiesProvided) await prisma.studentAllergy.deleteMany({ where: { studentId: id } });
     const validUpdateAllergies = finalAllergies.filter(
       (alg) => Boolean(alg) && alg.toLowerCase() !== 'none'
     );
-    if (validUpdateAllergies.length > 0) {
+    if (allergiesProvided && validUpdateAllergies.length > 0) {
       await Promise.all(
         validUpdateAllergies.map(async (alg) => {
           const allergyRecord = await prisma.allergy.upsert({
@@ -330,7 +338,7 @@ export async function PUT(req: Request) {
 
 export async function DELETE(req: Request) {
   try {
-    const user = await getCurrentUser();
+    const user = await getCurrentUser(req);
     if (!user || user.role !== 'PARENT' || !user.parentId) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }

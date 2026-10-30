@@ -17,6 +17,15 @@ import {
 import { formatINR, formatDateTimePretty } from '@/lib/utils';
 import { PaymentData } from '@/types';
 
+const PAYMENT_STATUS_LABELS: Record<string, string> = {
+  SUCCESS: 'Paid',
+  PENDING: 'Pending',
+  FAILED: 'Failed',
+  REFUNDED: 'Refunded',
+  REFUND_PENDING: 'Refund in progress',
+  REFUND_FAILED: 'Refund issue (canteen will contact you)',
+};
+
 export default function PaymentsPage() {
   const [payments, setPayments] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -99,19 +108,19 @@ export default function PaymentsPage() {
 
       {/* Filter Bar */}
       <div className="bg-white p-4 rounded-2xl border border-slate-100 shadow-xs flex flex-wrap items-center justify-between gap-3 text-xs">
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <span className="font-bold text-slate-700 uppercase tracking-wider text-[10px]">Filter Status:</span>
-          {['ALL', 'SUCCESS', 'PENDING', 'FAILED'].map((st) => (
+          {['ALL', 'SUCCESS', 'REFUNDED', 'REFUND_PENDING'].map((st) => (
             <button
               key={st}
               onClick={() => setStatusFilter(st)}
-              className={`px-3 py-1.5 rounded-xl font-bold transition-all ${
+              className={`px-3 py-2 rounded-xl font-bold transition-all ${
                 statusFilter === st
                   ? 'bg-amber-500 text-white shadow-xs'
                   : 'bg-slate-50 text-slate-600 hover:bg-slate-100'
               }`}
             >
-              {st}
+              {st === 'ALL' ? 'All' : PAYMENT_STATUS_LABELS[st] || st}
             </button>
           ))}
         </div>
@@ -201,13 +210,15 @@ export default function PaymentsPage() {
                         className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold border ${
                           p.status === 'SUCCESS'
                             ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
-                            : p.status === 'PENDING'
+                            : p.status === 'PENDING' || p.status === 'REFUND_PENDING'
                             ? 'bg-amber-50 text-amber-700 border-amber-200'
+                            : p.status === 'REFUNDED'
+                            ? 'bg-sky-50 text-sky-700 border-sky-200'
                             : 'bg-rose-50 text-rose-700 border-rose-200'
                         }`}
                       >
                         {p.status === 'SUCCESS' && <CheckCircle2 className="w-3 h-3" />}
-                        <span>{p.status}</span>
+                        <span>{PAYMENT_STATUS_LABELS[p.status] || p.status}</span>
                       </span>
                     </td>
                   </tr>

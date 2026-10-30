@@ -60,7 +60,12 @@ export async function verifySessionToken(token: string): Promise<TokenPayload | 
   }
 }
 
-export async function getCurrentUser(req?: Request) {
+/**
+ * `throwOnUnavailable`: a database failure throws instead of returning null. Only /api/auth/me uses
+ * it, so a short outage is reported as an error (the app keeps the session) rather than as "signed
+ * out". Every other caller still fails closed.
+ */
+export async function getCurrentUser(req?: Request, { throwOnUnavailable = false } = {}) {
   let token: string | undefined;
 
   try {
@@ -79,7 +84,7 @@ export async function getCurrentUser(req?: Request) {
 
   if (!token) return null;
 
-  return resolveSessionUser(token);
+  return resolveSessionUser(token, loadUserById, { throwOnUnavailable });
 }
 
 function loadUserById(userId: string) {
@@ -104,7 +109,8 @@ function loadUserById(userId: string) {
  */
 export async function resolveSessionUser(
   token: string,
-  loadUser: (userId: string) => Promise<any> = loadUserById
+  loadUser: (userId: string) => Promise<any> = loadUserById,
+  { throwOnUnavailable = false } = {}
 ) {
   const payload = await verifySessionToken(token);
   if (!payload?.userId) return null;
@@ -115,6 +121,7 @@ export async function resolveSessionUser(
   } catch (err) {
     // Fail closed: without a database answer the session cannot be trusted.
     console.error('[Auth] Could not load session user:', err instanceof Error ? err.message : err);
+    if (throwOnUnavailable) throw err;
     return null;
   }
 

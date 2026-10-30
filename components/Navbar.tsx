@@ -138,6 +138,17 @@ export default function Navbar() {
                   <GraduationCap className="w-4 h-4" />
                   Teacher Menu
                 </Link>
+                <Link
+                  href="/staff/menu-import"
+                  className={`px-3.5 py-1.5 text-sm font-medium rounded-lg transition-colors flex items-center gap-1.5 ${
+                    isActive('/staff/menu-import')
+                      ? 'bg-emerald-100 text-emerald-900 font-bold'
+                      : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+                  }`}
+                >
+                  <CalendarDays className="w-4 h-4" />
+                  Monthly Menu
+                </Link>
               </>
             )}
 
@@ -169,6 +180,15 @@ export default function Navbar() {
                     }`}
                 >
                   Orders
+                </Link>
+                <Link
+                  href="/admin/payment-exceptions"
+                  className={`px-3.5 py-1.5 text-sm font-medium rounded-lg transition-colors ${isActive('/admin/payment-exceptions')
+                    ? 'bg-purple-50 text-purple-700 font-bold'
+                    : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+                    }`}
+                >
+                  Payment Issues
                 </Link>
                 <Link
                   href="/admin/kitchen"
@@ -526,6 +546,18 @@ export default function Navbar() {
                 <GraduationCap className={`w-4 h-4 ${isActive('/staff/teacher-menu') ? 'text-emerald-600' : 'text-slate-400'}`} />
                 Teacher Menu
               </Link>
+              <Link
+                href="/staff/menu-import"
+                onClick={() => setMobileMenuOpen(false)}
+                className={`px-3 py-2 text-sm rounded-lg flex items-center gap-2 transition-colors ${
+                  isActive('/staff/menu-import')
+                    ? 'font-bold text-emerald-900 bg-emerald-100'
+                    : 'font-medium text-slate-700 hover:bg-slate-50'
+                }`}
+              >
+                <CalendarDays className={`w-4 h-4 ${isActive('/staff/menu-import') ? 'text-emerald-600' : 'text-slate-400'}`} />
+                Monthly Menu
+              </Link>
               <button
                 onClick={() => {
                   setMobileMenuOpen(false);
@@ -563,6 +595,13 @@ export default function Navbar() {
                 className="px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 rounded-lg"
               >
                 Orders
+              </Link>
+              <Link
+                href="/admin/payment-exceptions"
+                onClick={() => setMobileMenuOpen(false)}
+                className="px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 rounded-lg"
+              >
+                Payment Issues
               </Link>
               <Link
                 href="/admin/kitchen"

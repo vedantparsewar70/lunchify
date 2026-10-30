@@ -54,23 +54,36 @@ const DEFAULT_TEACHER_MEALS = [
   },
 ];
 
+const TEACHER_MENU_SEEDED_KEY = 'TEACHER_MENU_SEEDED';
+
 export async function GET() {
   try {
     const snap = await db.collection('teacher_meals').get();
 
-    // If no items seeded yet, seed default teacher menu
+    // The default items are a one-time starting point for a brand-new database. Once the teacher
+    // menu has existed (marker set), an empty menu means staff removed everything on purpose, and
+    // it must stay empty rather than reappear.
+    const markerRef = db.collection('systemSettings').doc(TEACHER_MENU_SEEDED_KEY);
     if (snap.empty) {
+      const marker = await markerRef.get();
+      if (marker.exists) {
+        return NextResponse.json({ meals: [] });
+      }
       const batch = db.batch();
       const now = new Date().toISOString();
       for (const meal of DEFAULT_TEACHER_MEALS) {
         const ref = db.collection('teacher_meals').doc(meal.id);
         batch.set(ref, cleanDoc({ ...meal, createdAt: now, updatedAt: now }));
       }
+      batch.set(markerRef, { key: TEACHER_MENU_SEEDED_KEY, value: 'true', updatedAt: now });
       await batch.commit();
 
       return NextResponse.json({
         meals: DEFAULT_TEACHER_MEALS.filter((m) => m.isAvailable),
       });
+    }
+    if (!(await markerRef.get()).exists) {
+      await markerRef.set({ key: TEACHER_MENU_SEEDED_KEY, value: 'true', updatedAt: new Date().toISOString() });
     }
 
     const meals = snap.docs

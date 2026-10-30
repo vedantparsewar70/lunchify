@@ -6,6 +6,12 @@ export type SyncEventType = 'MENU_UPDATED' | 'ORDERS_UPDATED' | 'TEACHER_ORDERS_
 
 const CHANNEL_NAME = 'schoolbite_live_sync';
 const STORAGE_KEY = 'schoolbite_sync_event';
+// Identifies this tab, so its own cross-tab messages are not handled a second time (the
+// same-window CustomEvent already delivered them).
+const TAB_ID = typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : String(Math.random());
+// Events of one type arriving within this window (BroadcastChannel + storage fallback, or several
+// quick handovers) trigger a single refresh.
+const COALESCE_MS = 800;
 
 /**
  * Broadcast an event locally across all open tabs/windows in the browser immediately (0ms latency).
@@ -13,7 +19,7 @@ const STORAGE_KEY = 'schoolbite_sync_event';
 export function broadcastSyncEvent(type: SyncEventType) {
   if (typeof window === 'undefined') return;
 
-  const payload = { type, timestamp: Date.now() };
+  const payload = { type, timestamp: Date.now(), source: TAB_ID };
 
   // 1. Same-window CustomEvent
   window.dispatchEvent(new CustomEvent('schoolbite_sync', { detail: payload }));
@@ -53,7 +59,7 @@ export function useSyncWatcher({
   onMenuUpdate,
   onOrdersUpdate,
   onTeacherOrdersUpdate,
-  pollIntervalMs = 3500,
+  pollIntervalMs = 10000,
   enabled = true,
 }: UseSyncWatcherOptions) {
   const lastVersionsRef = useRef<{
@@ -70,6 +76,23 @@ export function useSyncWatcher({
 
   useEffect(() => {
     if (!enabled || typeof window === 'undefined') return;
+
+    // Runs each callback at most once per burst of events of the same type.
+    const pending = new Map<SyncEventType, ReturnType<typeof setTimeout>>();
+    const dispatch = (type: unknown, source?: unknown) => {
+      if (source === TAB_ID) return;
+      if (type !== 'MENU_UPDATED' && type !== 'ORDERS_UPDATED' && type !== 'TEACHER_ORDERS_UPDATED') return;
+      if (pending.has(type)) return;
+      pending.set(
+        type,
+        setTimeout(() => {
+          pending.delete(type);
+          if (type === 'MENU_UPDATED') callbacksRef.current.onMenuUpdate?.();
+          else if (type === 'ORDERS_UPDATED') callbacksRef.current.onOrdersUpdate?.();
+          else callbacksRef.current.onTeacherOrdersUpdate?.();
+        }, COALESCE_MS)
+      );
+    };
 
     // 1. Function to check server versions
     let isFetching = false;
@@ -90,19 +113,19 @@ export function useSyncWatcher({
           return;
         }
 
-        if (data.menuVersion && data.menuVersion !== prev.menuVersion) {
+        if (data.menuVersion && data.menuVersion > (prev.menuVersion ?? 0)) {
           prev.menuVersion = data.menuVersion;
-          callbacksRef.current.onMenuUpdate?.();
+          dispatch('MENU_UPDATED');
         }
 
-        if (data.ordersVersion && data.ordersVersion !== prev.ordersVersion) {
+        if (data.ordersVersion && data.ordersVersion > (prev.ordersVersion ?? 0)) {
           prev.ordersVersion = data.ordersVersion;
-          callbacksRef.current.onOrdersUpdate?.();
+          dispatch('ORDERS_UPDATED');
         }
 
-        if (data.teacherOrdersVersion && data.teacherOrdersVersion !== prev.teacherOrdersVersion) {
+        if (data.teacherOrdersVersion && data.teacherOrdersVersion > (prev.teacherOrdersVersion ?? 0)) {
           prev.teacherOrdersVersion = data.teacherOrdersVersion;
-          callbacksRef.current.onTeacherOrdersUpdate?.();
+          dispatch('TEACHER_ORDERS_UPDATED');
         }
       } catch (err) {
         // network hiccups ignored during background sync
@@ -120,14 +143,8 @@ export function useSyncWatcher({
       if ('BroadcastChannel' in window) {
         channel = new BroadcastChannel(CHANNEL_NAME);
         channel.onmessage = (event) => {
-          const { type } = event.data || {};
-          if (type === 'MENU_UPDATED') {
-            callbacksRef.current.onMenuUpdate?.();
-          } else if (type === 'ORDERS_UPDATED') {
-            callbacksRef.current.onOrdersUpdate?.();
-          } else if (type === 'TEACHER_ORDERS_UPDATED') {
-            callbacksRef.current.onTeacherOrdersUpdate?.();
-          }
+          const { type, source } = event.data || {};
+          dispatch(type, source);
         };
       }
     } catch {
@@ -138,13 +155,7 @@ export function useSyncWatcher({
     const handleCustomEvent = (e: Event) => {
       const customEvt = e as CustomEvent;
       const { type } = customEvt.detail || {};
-      if (type === 'MENU_UPDATED') {
-        callbacksRef.current.onMenuUpdate?.();
-      } else if (type === 'ORDERS_UPDATED') {
-        callbacksRef.current.onOrdersUpdate?.();
-      } else if (type === 'TEACHER_ORDERS_UPDATED') {
-        callbacksRef.current.onTeacherOrdersUpdate?.();
-      }
+      dispatch(type);
     };
     window.addEventListener('schoolbite_sync', handleCustomEvent);
 
@@ -152,14 +163,8 @@ export function useSyncWatcher({
     const handleStorageEvent = (e: StorageEvent) => {
       if (e.key === STORAGE_KEY && e.newValue) {
         try {
-          const { type } = JSON.parse(e.newValue);
-          if (type === 'MENU_UPDATED') {
-            callbacksRef.current.onMenuUpdate?.();
-          } else if (type === 'ORDERS_UPDATED') {
-            callbacksRef.current.onOrdersUpdate?.();
-          } else if (type === 'TEACHER_ORDERS_UPDATED') {
-            callbacksRef.current.onTeacherOrdersUpdate?.();
-          }
+          const { type, source } = JSON.parse(e.newValue);
+          dispatch(type, source);
         } catch {
           // ignore
         }
@@ -185,6 +190,7 @@ export function useSyncWatcher({
 
     return () => {
       clearInterval(intervalId);
+      pending.forEach((timer) => clearTimeout(timer));
       if (channel) channel.close();
       window.removeEventListener('schoolbite_sync', handleCustomEvent);
       window.removeEventListener('storage', handleStorageEvent);

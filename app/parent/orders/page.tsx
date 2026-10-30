@@ -25,7 +25,53 @@ import {
   formatDatePretty,
   formatDateTimePretty,
   getOrderStatusColor,
+  isDeadlinePassed,
 } from '@/lib/utils';
+import { BUSINESS_CONFIG } from '@/lib/business-config';
+
+const PAYMENT_BADGE: Record<string, { label: string; tone: string }> = {
+  PAID: { label: 'Paid', tone: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
+  REFUND_PENDING: { label: 'Refund in progress', tone: 'bg-amber-50 text-amber-800 border-amber-200' },
+  REFUNDED: { label: 'Refunded', tone: 'bg-sky-50 text-sky-800 border-sky-200' },
+  REFUND_FAILED: { label: 'Refund issue', tone: 'bg-rose-50 text-rose-700 border-rose-200' },
+};
+
+/** Payments received that did not become an order automatically (see /api/parent/orders). */
+const ISSUE_STATE: Record<string, { label: string; text: string; tone: string }> = {
+  PENDING_REVIEW: {
+    label: 'Payment received · under review',
+    text: 'The canteen will either accept this as an order or refund it in full. Please do not pay again.',
+    tone: 'bg-amber-50 border-amber-200 text-amber-900',
+  },
+  REFUND_PENDING: {
+    label: 'Refund in progress',
+    text: 'A full refund has been started to your original payment method.',
+    tone: 'bg-sky-50 border-sky-200 text-sky-900',
+  },
+  REFUNDED: {
+    label: 'Refunded',
+    text: 'This payment was refunded in full to your original payment method.',
+    tone: 'bg-emerald-50 border-emerald-200 text-emerald-900',
+  },
+  REFUND_FAILED: {
+    label: 'Refund issue',
+    text: 'The refund could not be completed automatically. Please contact the school canteen.',
+    tone: 'bg-rose-50 border-rose-200 text-rose-900',
+  },
+};
+
+const ISSUE_REASON: Record<string, string> = {
+  PAID_AFTER_CUTOFF: 'Payment completed after the ordering deadline.',
+  SERVICE_UNAVAILABLE: 'The meal is no longer being served that day.',
+  STOCK_UNAVAILABLE: 'A meal sold out before the payment completed.',
+  AMOUNT_MISMATCH: 'The amount paid did not match the order total.',
+};
+
+const SERVICE_LABEL: Record<string, string> = {
+  PREPARING: 'Being prepared',
+  READY: 'Ready',
+  COLLECTED: 'Given',
+};
 
 function OrdersPageContent() {
   const searchParams = useSearchParams();
@@ -35,6 +81,7 @@ function OrdersPageContent() {
   const { showToast } = useToast();
 
   const [orders, setOrders] = useState<any[]>([]);
+  const [paymentIssues, setPaymentIssues] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
 
   const fetchOrders = async (isBackground = false) => {
@@ -44,6 +91,7 @@ function OrdersPageContent() {
       if (res.ok) {
         const data = await res.json();
         setOrders(data.orders || []);
+        setPaymentIssues(data.paymentIssues || []);
       }
     } catch (err) {
       console.error('Failed to fetch orders:', err);
@@ -55,6 +103,45 @@ function OrdersPageContent() {
   useEffect(() => {
     fetchOrders();
   }, []);
+
+  const [cancellingId, setCancellingId] = useState<string | null>(null);
+
+  // Mirrors the server rule (the server re-checks): paid, no day prepared or given yet, and before
+  // every meal's cutoff. A multi-day order is cancelled and refunded as a whole.
+  const canCancel = (order: any) =>
+    order.paymentStatus === 'PAID' &&
+    order.orderStatus === 'CONFIRMED' &&
+    (order.items || []).every(
+      (it: { date: string; serviceStatus?: string }) =>
+        (it.serviceStatus || 'CONFIRMED') === 'CONFIRMED' && !isDeadlinePassed(it.date, '08:30')
+    );
+
+  const cancelOrder = async (order: any, mode: 'cancel' | 'retry') => {
+    const days = new Set((order.items || []).map((it: { date?: string }) => it.date)).size;
+    const scope = days > 1 ? ` This cancels all ${days} days in this order.` : '';
+    if (mode === 'cancel' && !window.confirm(`Cancel order ${order.id}?${scope} ${formatINR(order.totalAmount)} will be refunded to your original payment method.`)) {
+      return;
+    }
+    setCancellingId(order.id);
+    try {
+      const res = await fetch('/api/parent/orders', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ orderId: order.id }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        showToast(data.error || 'This order could not be cancelled.', 'error');
+      } else {
+        showToast(data.message || 'Order cancelled.', data.paymentStatus === 'REFUND_FAILED' ? 'error' : 'success');
+      }
+      await fetchOrders(true);
+    } catch {
+      showToast('Network error. Please check your order status before trying again.', 'error');
+    } finally {
+      setCancellingId(null);
+    }
+  };
 
   // Live real-time synchronization: updates order status immediately when canteen staff marks it as Given/Collected
   useSyncWatcher({
@@ -85,6 +172,28 @@ function OrdersPageContent() {
           <span>Order Lunch</span>
         </Link>
       </div>
+
+      {!loading && paymentIssues.length > 0 && (
+        <section className="space-y-3" aria-label="Payments under review or refunded">
+          <h2 className="text-sm font-extrabold text-slate-800">Payments not turned into orders</h2>
+          {paymentIssues.map((issue) => {
+            const state = ISSUE_STATE[issue.state] || ISSUE_STATE.PENDING_REVIEW;
+            return (
+              <div key={issue.orderId} className={`rounded-2xl border p-4 space-y-1.5 text-sm ${state.tone}`}>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="font-extrabold">{state.label}</span>
+                  <span className="font-bold">{formatINR(issue.paidAmount)}</span>
+                </div>
+                <p className="text-xs">{ISSUE_REASON[issue.reason] || ''} {state.text}</p>
+                <p className="text-[11px] opacity-80 break-all">
+                  Ref {issue.orderId}
+                  {issue.dates?.length ? ` · for ${issue.dates.map((d: string) => formatDatePretty(d)).join(', ')}` : ''}
+                </p>
+              </div>
+            );
+          })}
+        </section>
+      )}
 
       {loading ? (
         <div className="min-h-[40vh] flex items-center justify-center">
@@ -137,8 +246,8 @@ function OrdersPageContent() {
                       <span>{statusStyle.text}</span>
                     </span>
 
-                    <span className="text-xs font-semibold px-2 py-0.5 bg-emerald-50 text-emerald-700 rounded-md border border-emerald-200">
-                      Paid: {formatINR(order.totalAmount)}
+                    <span className={`text-xs font-semibold px-2 py-0.5 rounded-md border ${PAYMENT_BADGE[order.paymentStatus]?.tone || PAYMENT_BADGE.PAID.tone}`}>
+                      {(PAYMENT_BADGE[order.paymentStatus] || PAYMENT_BADGE.PAID).label}: {formatINR(order.totalAmount)}
                     </span>
                   </div>
                 </div>
@@ -163,8 +272,19 @@ function OrdersPageContent() {
                               For: <strong className="text-slate-700">{item.studentName}</strong> (Class {item.studentGrade}-{item.studentDivision}, Roll: {item.studentRollNo})
                             </span>
                           </div>
-                          <p className="text-[11px] font-semibold text-amber-700">
-                            Scheduled for: {formatDatePretty(item.date)}
+                          <p className="text-[11px] font-semibold text-amber-700 flex flex-wrap items-center gap-1.5">
+                            <span>Scheduled for: {formatDatePretty(item.date)}</span>
+                            {order.orderStatus !== 'CANCELLED' && SERVICE_LABEL[item.serviceStatus] && (
+                              <span
+                                className={`px-1.5 py-0.5 rounded-md border text-[10px] font-bold ${
+                                  item.serviceStatus === 'COLLECTED'
+                                    ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                                    : 'bg-slate-50 text-slate-600 border-slate-200'
+                                }`}
+                              >
+                                {SERVICE_LABEL[item.serviceStatus]}
+                              </span>
+                            )}
                           </p>
                         </div>
                       </div>
@@ -181,7 +301,32 @@ function OrdersPageContent() {
                   <div className="text-slate-400 text-[11px]">
                     Payment Ref: {order.payments?.[0]?.transactionRef || 'PAID'} • {order.payments?.[0]?.paymentMethod || 'UPI'}
                   </div>
+                  {canCancel(order) && (
+                    <button
+                      onClick={() => cancelOrder(order, 'cancel')}
+                      disabled={cancellingId === order.id}
+                      className="px-4 py-2.5 rounded-xl border border-rose-300 text-rose-700 hover:bg-rose-50 text-sm font-bold disabled:opacity-60"
+                    >
+                      {cancellingId === order.id ? 'Cancelling…' : 'Cancel order'}
+                    </button>
+                  )}
+                  {order.paymentStatus === 'REFUND_FAILED' && (
+                    <button
+                      onClick={() => cancelOrder(order, 'retry')}
+                      disabled={cancellingId === order.id}
+                      className="px-4 py-2.5 rounded-xl border border-slate-300 text-slate-700 hover:bg-slate-50 text-sm font-bold disabled:opacity-60"
+                    >
+                      {cancellingId === order.id ? 'Retrying…' : 'Retry refund'}
+                    </button>
+                  )}
                 </div>
+                {order.paymentStatus === 'PAID' && !['CANCELLED', 'COLLECTED'].includes(order.orderStatus) && !canCancel(order) && (
+                  <p className="pt-2 text-[11px] text-slate-500">
+                    {new Set((order.items || []).map((it: { date?: string }) => it.date)).size > 1
+                      ? `This order covers several days and is cancelled and refunded as a whole, only before the ${BUSINESS_CONFIG.cancellationCutoffTime} cutoff of its first day and before any meal is prepared or given. Single days cannot be cancelled separately yet. For help, contact the canteen.`
+                      : `Cancellation closes at the ${BUSINESS_CONFIG.cancellationCutoffTime} cutoff, or once the meal is being prepared.`}
+                  </p>
+                )}
               </div>
             );
           })}

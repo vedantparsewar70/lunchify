@@ -35,6 +35,7 @@ export async function POST(req: Request) {
       return NextResponse.json({
         success: record.paymentStatus === 'PAID',
         verified: record.paymentStatus === 'PAID',
+        state: record.paymentStatus === 'PAID' ? 'PAID' : 'CANCELLED',
         orderId,
         paymentStatus: record.paymentStatus,
         orderStatus: record.orderStatus || 'CONFIRMED',
@@ -61,16 +62,22 @@ export async function POST(req: Request) {
 
       if (!result.success) {
         console.error(`[Teacher Payment Review] Order ${orderId}: ${result.reason} - ${result.message}`);
-        return NextResponse.json(
-          { error: 'Payment received but the order could not be confirmed automatically. The canteen will review it.' },
-          { status: 409 }
-        );
+        // Paid, but no order: reported truthfully (never as "not paid").
+        return NextResponse.json({
+          success: false,
+          verified: true,
+          state: 'EXCEPTION',
+          orderId,
+          reason: result.reason,
+          message: 'Your payment was received but the order could not be confirmed automatically. The canteen will review it and contact you about a refund if needed.',
+        });
       }
 
       const updatedData = (await orderRef.get()).data() || {};
       return NextResponse.json({
         success: true,
         verified: true,
+        state: 'PAID',
         orderId,
         paymentStatus: 'PAID',
         orderStatus: updatedData.orderStatus || 'CONFIRMED',
@@ -79,14 +86,18 @@ export async function POST(req: Request) {
       });
     }
 
-    // 4. Payment is incomplete, dropped, or failed: Strictly DO NOT create any order!
+    // 4. No successful payment (yet): strictly no order. ACTIVE = payment window still open.
+    const stillOpen = verified.orderStatus === 'ACTIVE';
     return NextResponse.json({
       success: false,
       verified: false,
+      state: stillOpen ? 'PENDING' : 'NOT_PAID',
       orderId,
-      paymentStatus: 'FAILED',
+      paymentStatus: stillOpen ? 'PENDING' : 'FAILED',
       orderStatus: 'NONE',
-      message: 'Payment was not completed. Strictly no order was created.',
+      message: stillOpen
+        ? 'We have not received confirmation of this payment yet. If you completed it, please wait a minute. Do not pay again.'
+        : 'This payment was not completed, so no order was created. If money was debited, your bank will reverse it automatically.',
     });
   } catch (error: any) {
     console.error('Error verifying teacher order:', error);

@@ -8,7 +8,7 @@ import {
 import { db } from '@/lib/firebase-admin';
 import { fulfillParentOrder, fulfillTeacherOrder } from '@/lib/order-fulfillment';
 import { applyRefundStatus } from '@/lib/order-cancellation';
-import { applyExceptionRefundStatus, refundPaymentException } from '@/lib/payment-exceptions';
+import { applyExceptionRefundStatus, isAutoRefundReason, refundPaymentException } from '@/lib/payment-exceptions';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -86,7 +86,7 @@ export async function POST(req: Request) {
     if (!result.success) {
       // Recorded as a payment exception; acknowledge so the gateway does not keep retrying.
       console.error(`[Cashfree Webhook] Order ${orderId} not fulfilled: ${result.reason} - ${result.message}`);
-      if (result.reason === 'STOCK_UNAVAILABLE' && result.exceptionRecorded) {
+      if (isAutoRefundReason(result.reason) && result.exceptionRecorded) {
         const refund = await refundPaymentException(orderId);
         console.log(`[Cashfree Webhook] Unfulfillable payment ${orderId}: refund ${refund.refundState}`);
       }
