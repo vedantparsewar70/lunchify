@@ -72,6 +72,14 @@ function StaffKitchenContent() {
   const [assignMealId, setAssignMealId] = useState('');
   const [assigning, setAssigning] = useState(false);
   const [assignMessage, setAssignMessage] = useState<{ ok: boolean; text: string } | null>(null);
+  // The box has its own date. It follows the date chosen at the top of the page whenever that
+  // changes, and staff can pick another one here; this is the date sent when publishing.
+  const [assignDate, setAssignDate] = useState(selectedDateStr);
+  const [assignDateFollows, setAssignDateFollows] = useState(selectedDateStr);
+  if (assignDateFollows !== selectedDateStr) {
+    setAssignDateFollows(selectedDateStr);
+    setAssignDate(selectedDateStr);
+  }
 
   // --- Edit Food Item Modal State ---
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
@@ -255,6 +263,14 @@ function StaffKitchenContent() {
 
   // Publish an existing catalog recipe (same ID and price) for one date and category.
   const handleAssignRecipe = async (replace = false) => {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(assignDate)) {
+      setAssignMessage({ ok: false, text: 'Choose the date on which parents can order this dish.' });
+      return;
+    }
+    if (assignDate < getTodayString()) {
+      setAssignMessage({ ok: false, text: 'This date has already passed. Choose today or a later date.' });
+      return;
+    }
     if (!assignMealId) {
       setAssignMessage({ ok: false, text: 'Choose a recipe from the catalog first.' });
       return;
@@ -265,7 +281,7 @@ function StaffKitchenContent() {
       const res = await fetch('/api/admin/menus/assign', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ date: selectedDateStr, studentCategory: assignCategory, mealId: assignMealId, replace }),
+        body: JSON.stringify({ date: assignDate, studentCategory: assignCategory, mealId: assignMealId, replace }),
       });
       const data = await res.json().catch(() => ({}));
       if (res.ok) {
@@ -689,52 +705,69 @@ function StaffKitchenContent() {
           })}
         </div>
 
-        {/* Put an existing catalog recipe on this date's menu */}
-        {!isPastDate && (
-          <div className="p-3.5 bg-white border border-amber-200 rounded-2xl space-y-2.5 text-xs">
-            <p className="font-black text-slate-800">Publish a catalog recipe for {formatDatePretty(selectedDateStr)}</p>
-            <div className="flex flex-col sm:flex-row gap-2">
-              <select
-                value={assignCategory}
-                onChange={(e) => setAssignCategory(e.target.value as StudentCategory | 'ALL')}
-                className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl font-semibold text-slate-900"
-              >
-                <option value="ALL">All categories</option>
-                <option value="Pre-primary">Pre-primary</option>
-                <option value="Primary">Primary</option>
-                <option value="Secondary">Secondary</option>
-              </select>
-              <select
-                value={assignMealId}
-                onChange={(e) => setAssignMealId(e.target.value)}
-                className="flex-1 min-w-0 px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl font-semibold text-slate-900"
-              >
-                <option value="">Choose a recipe…</option>
-                {[...allMeals]
-                  .sort((a, b) => a.name.localeCompare(b.name))
-                  .map((meal) => (
-                    <option key={meal.id} value={meal.id}>
-                      {meal.name} · {formatINR(meal.price)}
-                    </option>
-                  ))}
-              </select>
-              <button
-                type="button"
-                onClick={() => handleAssignRecipe()}
-                disabled={assigning}
-                className="px-4 py-2 bg-gradient-to-r from-amber-500 to-orange-500 text-white rounded-xl font-black disabled:opacity-50 inline-flex items-center justify-center gap-1.5"
-              >
-                {assigning ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : null}
-                <span>{assigning ? 'Publishing…' : 'Publish for parents'}</span>
-              </button>
-            </div>
-            {assignMessage && (
-              <p role="status" className={`font-bold ${assignMessage.ok ? 'text-emerald-700' : 'text-rose-700'}`}>
-                {assignMessage.text}
-              </p>
-            )}
+        {/* Put an existing catalog recipe on the menu for a chosen date */}
+        <div className="p-3.5 bg-white border border-amber-200 rounded-2xl space-y-2.5 text-xs">
+          <p className="font-black text-slate-800">
+            Publish a catalog recipe for {assignDate ? formatDatePretty(assignDate) : 'the chosen date'}
+          </p>
+          <label className="flex flex-wrap items-center gap-2 font-bold text-slate-700">
+            <span>Choose Date</span>
+            <input
+              type="date"
+              value={assignDate}
+              min={todayDateStr}
+              max={getOffsetDateString(120)}
+              onChange={(e) => {
+                setAssignDate(e.target.value);
+                setAssignMessage(null);
+              }}
+              className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl font-semibold text-slate-900"
+            />
+          </label>
+          <div className="flex flex-col sm:flex-row gap-2">
+            <select
+              value={assignCategory}
+              onChange={(e) => setAssignCategory(e.target.value as StudentCategory | 'ALL')}
+              className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl font-semibold text-slate-900"
+            >
+              <option value="ALL">All categories</option>
+              <option value="Pre-primary">Pre-primary</option>
+              <option value="Primary">Primary</option>
+              <option value="Secondary">Secondary</option>
+            </select>
+            <select
+              value={assignMealId}
+              onChange={(e) => setAssignMealId(e.target.value)}
+              className="flex-1 min-w-0 px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl font-semibold text-slate-900"
+            >
+              <option value="">Choose a recipe…</option>
+              {[...allMeals]
+                .sort((a, b) => a.name.localeCompare(b.name))
+                .map((meal) => (
+                  <option key={meal.id} value={meal.id}>
+                    {meal.name} · {formatINR(meal.price)}
+                  </option>
+                ))}
+            </select>
+            <button
+              type="button"
+              onClick={() => handleAssignRecipe()}
+              disabled={assigning}
+              className="px-4 py-2 bg-gradient-to-r from-amber-500 to-orange-500 text-white rounded-xl font-black disabled:opacity-50 inline-flex items-center justify-center gap-1.5"
+            >
+              {assigning ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : null}
+              <span>{assigning ? 'Publishing…' : 'Publish for parents'}</span>
+            </button>
           </div>
-        )}
+          {assignMessage && (
+            <p role="status" className={`font-bold ${assignMessage.ok ? 'text-emerald-700' : 'text-rose-700'}`}>
+              {assignMessage.text}
+            </p>
+          )}
+          <p className="text-slate-500">
+            Publishing only puts the dish on sale for that date. No order is created: parents choose it for their child and pay themselves.
+          </p>
+        </div>
 
         {/* Operational Note for Kitchen Crew */}
         <div className="p-3.5 bg-amber-100/70 border border-amber-200/90 rounded-2xl flex items-start gap-3 text-xs text-amber-950 font-medium">

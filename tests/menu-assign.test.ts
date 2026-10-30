@@ -122,3 +122,25 @@ test('if two catalog recipes share a name, the chosen one is never swapped for t
   const published = fs.getDoc('menus', `menu_${DAY}_primary`)?.mealId;
   assert.ok(published === mealId || published === 'meal_paneer_old');
 });
+
+test('publishing for a chosen date affects only that date; it creates no order, payment or stock change', async () => {
+  const LATER = '2099-01-07';
+  const mealId = await newRecipe();
+  const menusBefore = fs.list('menus').map((m) => ({ ...m }));
+
+  assert.equal((await publish({ date: LATER, studentCategory: 'Primary', mealId })).status, 200);
+
+  const later = (await (await parentMenu(jsonRequest(`/api/menu?date=${LATER}&category=Primary`, 'GET'))).json()).menus;
+  assert.deepEqual(later.map((m: { mealId: string }) => m.mealId), [mealId], 'on sale on the chosen date');
+  assert.deepEqual(await parentSees('Primary'), [], `${DAY} is unchanged`);
+  for (const m of menusBefore) assert.deepEqual(fs.getDoc('menus', m.id), m, 'existing entries untouched');
+
+  assert.equal(fs.list('orders').length, 0, 'no order is created');
+  assert.equal(fs.list('payments').length, 0);
+  assert.equal(fs.list('orderItems').length, 1, 'only the order that already existed');
+  assert.equal(fs.getDoc('menus', `menu_${LATER}_primary`)?.availableQuantity, 50);
+
+  const past = await publish({ date: '2020-03-02', studentCategory: 'Primary', mealId });
+  assert.equal(past.status, 400);
+  assert.match((await past.json()).error, /already passed/);
+});
