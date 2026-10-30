@@ -2,6 +2,11 @@ import { NextResponse } from 'next/server';
 import prisma from '@/lib/prisma';
 import { getCurrentUser } from '@/lib/auth';
 
+const MEAL_CATEGORIES = ['BREAKFAST', 'LUNCH', 'SNACK', 'BEVERAGE', 'BRUNCH'];
+
+/** Recipe names are compared without case or repeated spaces, so "Veg Pulao" and "veg  pulao" match. */
+const recipeNameKey = (name: string) => name.trim().replace(/\s+/g, ' ').toLowerCase();
+
 function isValidMealPrice(price: unknown): boolean {
   const value = Number(price);
   return price !== null && price !== '' && Number.isFinite(value) && value > 0 && value <= 10000;
@@ -51,11 +56,14 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'Unauthorized: Admin or Staff access required' }, { status: 403 });
     }
 
-    const body = await req.json();
+    const body = await req.json().catch(() => null);
+    if (!body || typeof body !== 'object') {
+      return NextResponse.json({ error: 'Invalid request' }, { status: 400 });
+    }
     const {
-      name,
+      name: rawName,
       description,
-      category = 'LUNCH',
+      category: rawCategory = 'LUNCH',
       isVegetarian = true,
       ingredients,
       allergens,
@@ -64,14 +72,32 @@ export async function POST(req: Request) {
       price,
     } = body;
 
-    if (!name || price === undefined || Number(price) <= 0) {
+    const name = typeof rawName === 'string' ? rawName.trim().replace(/\s+/g, ' ') : '';
+    if (name.length < 2 || name.length > 100) {
+      return NextResponse.json({ error: 'Please enter a recipe name (2-100 characters).' }, { status: 400 });
+    }
+    if (!isValidMealPrice(price)) {
+      return NextResponse.json({ error: 'Please enter a valid rate greater than ₹0 (up to ₹10,000).' }, { status: 400 });
+    }
+    const category = typeof rawCategory === 'string' ? rawCategory.toUpperCase().trim() : '';
+    if (!MEAL_CATEGORIES.includes(category)) {
+      return NextResponse.json({ error: 'Please choose a valid category.' }, { status: 400 });
+    }
+    if (typeof isVegetarian !== 'boolean') {
+      return NextResponse.json({ error: 'Vegetarian must be yes or no.' }, { status: 400 });
+    }
+
+    // A second click or a recipe added twice must not create a duplicate catalog entry.
+    const existing = await prisma.meal.findMany({});
+    const duplicate = existing.find((m) => typeof m.name === 'string' && recipeNameKey(m.name) === recipeNameKey(name));
+    if (duplicate) {
       return NextResponse.json(
-        { error: 'Name and a valid price (> 0) are required' },
-        { status: 400 }
+        { error: `A recipe named "${duplicate.name}" is already in the catalog.`, code: 'DUPLICATE_RECIPE', meal: duplicate },
+        { status: 409 }
       );
     }
 
-    const finalDesc = description?.trim() || `${name.trim()} - Freshly prepared at school canteen`;
+    const finalDesc = (typeof description === 'string' && description.trim()) || `${name} - Freshly prepared at school canteen`;
 
     // Build unified allergens array
     let finalAllergens: string[] = [];
@@ -83,11 +109,11 @@ export async function POST(req: Request) {
 
     const meal = await prisma.meal.create({
       data: {
-        name: name.trim(),
+        name,
         description: finalDesc,
-        category: category.toUpperCase().trim(),
-        isVegetarian: Boolean(isVegetarian),
-        ingredients: ingredients?.trim() || null,
+        category,
+        isVegetarian,
+        ingredients: typeof ingredients === 'string' && ingredients.trim() ? ingredients.trim() : null,
         allergens: finalAllergens.join(', ') || null,
         calories: calories ? Number(calories) : null,
         price: Number(price),
@@ -128,8 +154,8 @@ export async function POST(req: Request) {
 
     return NextResponse.json({ success: true, meal }, { status: 201 });
   } catch (error) {
-    console.error('Error creating meal:', error);
-    return NextResponse.json({ error: 'Failed to create meal' }, { status: 500 });
+    console.error('Error creating meal:', error instanceof Error ? error.name : 'UnknownError');
+    return NextResponse.json({ error: 'The recipe could not be saved. Please try again.' }, { status: 500 });
   }
 }
 
