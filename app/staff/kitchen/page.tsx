@@ -35,9 +35,9 @@ import { MealData } from '@/types';
 import {
   OCTOBER_2026_TIMETABLE,
   OCTOBER_2026_MEAL_CATALOG,
-  getStudentCategory,
   StudentCategory,
 } from '@/lib/october-2026-timetable';
+import { displayMenuEntry } from '@/lib/menu-entries';
 
 function StaffKitchenContent() {
   const { showToast } = useToast();
@@ -66,6 +66,12 @@ function StaffKitchenContent() {
   const [addMealError, setAddMealError] = useState('');
   // Blocks a second submit before React re-renders the disabled button (fast double click).
   const addMealInFlight = useRef(false);
+
+  // --- Put a catalog recipe on the menu for the selected date ---
+  const [assignCategory, setAssignCategory] = useState<StudentCategory | 'ALL'>('Primary');
+  const [assignMealId, setAssignMealId] = useState('');
+  const [assigning, setAssigning] = useState(false);
+  const [assignMessage, setAssignMessage] = useState<{ ok: boolean; text: string } | null>(null);
 
   // --- Edit Food Item Modal State ---
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
@@ -244,6 +250,38 @@ function StaffKitchenContent() {
     } finally {
       addMealInFlight.current = false;
       setCreatingMeal(false);
+    }
+  };
+
+  // Publish an existing catalog recipe (same ID and price) for one date and category.
+  const handleAssignRecipe = async (replace = false) => {
+    if (!assignMealId) {
+      setAssignMessage({ ok: false, text: 'Choose a recipe from the catalog first.' });
+      return;
+    }
+    setAssigning(true);
+    setAssignMessage(null);
+    try {
+      const res = await fetch('/api/admin/menus/assign', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ date: selectedDateStr, studentCategory: assignCategory, mealId: assignMealId, replace }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        setAssignMessage({ ok: true, text: data.message || 'Menu published.' });
+        broadcastSyncEvent('MENU_UPDATED');
+      } else if (data.code === 'NEEDS_REPLACE' && !replace) {
+        setAssigning(false);
+        if (window.confirm(`${data.error}\n\nReplace it?`)) await handleAssignRecipe(true);
+        return;
+      } else {
+        setAssignMessage({ ok: false, text: data.error || `The menu could not be saved (error ${res.status}).` });
+      }
+    } catch {
+      setAssignMessage({ ok: false, text: 'Could not reach the server. Check the connection and try again.' });
+    } finally {
+      setAssigning(false);
     }
   };
 
@@ -499,10 +537,8 @@ function StaffKitchenContent() {
         >
           {categoriesToDisplay.map((cat) => {
             const officialMenu = officialDayEntry?.menus[cat];
-            const dbMenu = currentDayMenus.find((m) => {
-              const mCat = getStudentCategory(undefined, m.studentCategory);
-              return mCat === cat;
-            });
+            // The same entry parents see and can order (one dish per date and category).
+            const dbMenu = displayMenuEntry(currentDayMenus, selectedDateStr, cat);
 
             // The saved menu is authoritative (it reflects imports and staff corrections); the
             // built-in October 2026 table is only a fallback for dates with no saved menu.
@@ -653,11 +689,58 @@ function StaffKitchenContent() {
           })}
         </div>
 
+        {/* Put an existing catalog recipe on this date's menu */}
+        {!isPastDate && (
+          <div className="p-3.5 bg-white border border-amber-200 rounded-2xl space-y-2.5 text-xs">
+            <p className="font-black text-slate-800">Publish a catalog recipe for {formatDatePretty(selectedDateStr)}</p>
+            <div className="flex flex-col sm:flex-row gap-2">
+              <select
+                value={assignCategory}
+                onChange={(e) => setAssignCategory(e.target.value as StudentCategory | 'ALL')}
+                className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl font-semibold text-slate-900"
+              >
+                <option value="ALL">All categories</option>
+                <option value="Pre-primary">Pre-primary</option>
+                <option value="Primary">Primary</option>
+                <option value="Secondary">Secondary</option>
+              </select>
+              <select
+                value={assignMealId}
+                onChange={(e) => setAssignMealId(e.target.value)}
+                className="flex-1 min-w-0 px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl font-semibold text-slate-900"
+              >
+                <option value="">Choose a recipe…</option>
+                {[...allMeals]
+                  .sort((a, b) => a.name.localeCompare(b.name))
+                  .map((meal) => (
+                    <option key={meal.id} value={meal.id}>
+                      {meal.name} · {formatINR(meal.price)}
+                    </option>
+                  ))}
+              </select>
+              <button
+                type="button"
+                onClick={() => handleAssignRecipe()}
+                disabled={assigning}
+                className="px-4 py-2 bg-gradient-to-r from-amber-500 to-orange-500 text-white rounded-xl font-black disabled:opacity-50 inline-flex items-center justify-center gap-1.5"
+              >
+                {assigning ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : null}
+                <span>{assigning ? 'Publishing…' : 'Publish for parents'}</span>
+              </button>
+            </div>
+            {assignMessage && (
+              <p role="status" className={`font-bold ${assignMessage.ok ? 'text-emerald-700' : 'text-rose-700'}`}>
+                {assignMessage.text}
+              </p>
+            )}
+          </div>
+        )}
+
         {/* Operational Note for Kitchen Crew */}
         <div className="p-3.5 bg-amber-100/70 border border-amber-200/90 rounded-2xl flex items-start gap-3 text-xs text-amber-950 font-medium">
           <Info className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
           <p>
-            <strong>Canteen Team Notice:</strong> Parents can only order a dish that shows <em>Published</em> above. A dish marked <em>Timetable Reference</em> or <em>Not published</em> is not on sale: import or publish the monthly menu for that date first. You do <em>not</em> need to select items from the recipe catalog.
+            <strong>Canteen Team Notice:</strong> Parents can only order a dish that shows <em>Published</em> above. A dish marked <em>Timetable Reference</em> or <em>Not published</em> is not on sale: import the monthly menu, or publish a catalog recipe for that date above. You do <em>not</em> need to select items from the recipe catalog.
           </p>
         </div>
       </section>

@@ -167,7 +167,7 @@ export default function AdminMenuPage() {
     showToast('Unselected visible items', 'info');
   };
 
-  const handlePublishMenu = async () => {
+  const handlePublishMenu = async (replace = false) => {
     setSaving(true);
     try {
       const res = await fetch('/api/admin/menus/publish', {
@@ -177,21 +177,30 @@ export default function AdminMenuPage() {
           date: selectedDate,
           studentCategory: selectedStudentCategory,
           selectedMealIds,
+          replace,
         }),
       });
 
+      const data = await res.json().catch(() => ({}));
       if (res.ok) {
         broadcastSyncEvent('MENU_UPDATED');
         showToast(
           `Menu for ${formatDatePretty(selectedDate)} saved successfully with ${selectedMealIds.length} items!`,
           'success'
         );
+        window.alert(data.message || 'Menu saved.');
+        fetchData();
+      } else if (data.code === 'NEEDS_REPLACE' && !replace) {
+        // One dish per date and category: replacing a different dish needs confirmation.
+        setSaving(false);
+        if (window.confirm(`${data.error}\n\nReplace it?`)) await handlePublishMenu(true);
+        return;
       } else {
-        const err = await res.json();
-        showToast(err.error || 'Failed to publish menu', 'error');
+        // Toasts are silent in this app, so the reason is shown directly.
+        window.alert(data.error || 'Failed to publish menu');
       }
     } catch {
-      showToast('Network error publishing menu', 'error');
+      window.alert('Network error publishing menu');
     } finally {
       setSaving(false);
     }
@@ -289,7 +298,7 @@ export default function AdminMenuPage() {
 
           <button
             type="button"
-            onClick={handlePublishMenu}
+            onClick={() => handlePublishMenu()}
             disabled={saving}
             className="px-4 sm:px-5 py-2 sm:py-2.5 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-700 hover:to-indigo-700 text-white font-extrabold text-xs sm:text-sm rounded-xl shadow-md shadow-purple-600/20 transition-all flex items-center gap-2 cursor-pointer disabled:opacity-70"
           >
@@ -525,7 +534,7 @@ export default function AdminMenuPage() {
       <div className="sm:hidden fixed bottom-16 left-0 right-0 z-30 p-3 bg-white/95 backdrop-blur-md border-t border-slate-200 shadow-lg">
         <button
           type="button"
-          onClick={handlePublishMenu}
+          onClick={() => handlePublishMenu()}
           disabled={saving}
           className="w-full py-3 bg-gradient-to-r from-purple-600 to-indigo-600 text-white font-extrabold text-sm rounded-xl shadow-md transition-all flex items-center justify-center gap-2"
         >

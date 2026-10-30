@@ -4,6 +4,7 @@ import { getTodayString, APP_TIMEZONE, isDeadlinePassed } from '@/lib/utils';
 import { evaluateAllergyConflict, getSystemSetting } from '@/lib/allergy';
 import { getCurrentUser } from '@/lib/auth';
 import { getStudentCategory } from '@/lib/october-2026-timetable';
+import { displayMenuEntry, type MenuEntryLike } from '@/lib/menu-entries';
 
 export function clearMenuCache() {
   // Authoritative database querying is always real-time
@@ -85,7 +86,7 @@ export async function GET(req: Request) {
     }
 
     // Authoritative real-time query
-    const menus = await prisma.menu.findMany({
+    const allMenus = await prisma.menu.findMany({
       where: whereClause,
       include: {
         meal: {
@@ -102,6 +103,12 @@ export async function GET(req: Request) {
         { meal: { name: 'asc' } },
       ],
     });
+
+    // One dish per date and category: if several tools left entries for the same day, parents see
+    // only the one that checkout accepts (lib/menu-entries.ts).
+    const menus = filterCategory
+      ? allMenus.filter((m) => displayMenuEntry(allMenus as MenuEntryLike[], m.date, filterCategory)?.id === m.id)
+      : allMenus;
 
     const allowAllergyOrdersSetting = await allowAllergyOrdersSettingPromise;
     const allowAllergyOrders = allowAllergyOrdersSetting === 'true';

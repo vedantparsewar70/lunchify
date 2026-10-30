@@ -1,10 +1,17 @@
 import { NextResponse } from 'next/server';
-import prisma from '@/lib/prisma';
 import { getCurrentUser } from '@/lib/auth';
 import { getStudentCategory } from '@/lib/october-2026-timetable';
+import { publishDish, withdrawDish } from '@/lib/menu-publish';
 
 export const dynamic = 'force-dynamic';
 
+/**
+ * Admin → Menu "Save & Publish". Each date has one dish per student category, so exactly one dish
+ * is published (for the chosen category, or all categories); with none selected the day's dish
+ * stops being sold. Same rules as Staff → Kitchen and the monthly import (lib/menu-publish.ts).
+ *
+ * Body: { date, studentCategory | category ('ALL' or a category), selectedMealIds: string[], replace? }
+ */
 export async function POST(req: Request) {
   try {
     const user = await getCurrentUser(req);
@@ -12,107 +19,38 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'Unauthorized: Admin or Staff access required' }, { status: 403 });
     }
 
-    const body = await req.json();
-    const { date, selectedMealIds, category, studentCategory } = body;
-    const targetCategory = studentCategory || category;
-
-    if (!date || !Array.isArray(selectedMealIds)) {
+    const body = await req.json().catch(() => null);
+    const { date, selectedMealIds, category, studentCategory, replace } = body || {};
+    if (typeof date !== 'string' || !Array.isArray(selectedMealIds)) {
       return NextResponse.json({ error: 'Date and selectedMealIds array are required' }, { status: 400 });
     }
+    const target = studentCategory || category;
+    const cat = !target || target === 'ALL' ? 'ALL' : getStudentCategory(undefined, String(target));
+    const mealIds = Array.from(new Set(selectedMealIds.filter((id: unknown) => typeof id === 'string' && id)));
 
-    const normalizedCat = targetCategory && targetCategory !== 'ALL' ? getStudentCategory(undefined, targetCategory) : undefined;
-
-    // 1. Fetch existing menus for this date (optionally filtered by studentCategory)
-    let whereClause: any = { date };
-    if (normalizedCat) {
-      whereClause.studentCategory = normalizedCat;
+    if (mealIds.length > 1) {
+      return NextResponse.json(
+        { error: 'Each class category has one dish per day. Select exactly one dish to publish.', code: 'ONE_DISH_PER_DAY' },
+        { status: 400 }
+      );
     }
 
-    const existingMenus = await prisma.menu.findMany({
-      where: whereClause,
-    });
+    const result =
+      mealIds.length === 1
+        ? await publishDish({ date, studentCategory: cat, mealId: mealIds[0], replace, actorId: user.id })
+        : await withdrawDish({ date, studentCategory: cat, actorId: user.id });
+    if (result.status !== 200) return NextResponse.json(result.body, { status: result.status });
 
-    const now = new Date().toISOString();
-
-    // 2. Enable selected meals & disable unselected meals
-    const updatePromises: Promise<any>[] = [];
-
-    // Enable existing menus that match selectedMealIds
-    for (const item of existingMenus) {
-      const shouldBeActive = selectedMealIds.includes(item.mealId);
-      if (item.isActive !== shouldBeActive) {
-        updatePromises.push(
-          prisma.menu.update({
-            where: { id: item.id },
-            data: { isActive: shouldBeActive, updatedAt: now },
-          })
-        );
-      }
-    }
-
-    // If any selectedMealId does not exist at all in existingMenus, create it
-    const existingMealIds = new Set(existingMenus.map((m: any) => m.mealId));
-    for (const mealId of selectedMealIds) {
-      if (!existingMealIds.has(mealId)) {
-        updatePromises.push(
-          prisma.menu.upsert({
-            where: {
-              mealId_date: { mealId, date },
-            },
-            update: { isActive: true, updatedAt: now },
-            create: {
-              mealId,
-              date,
-              studentCategory: normalizedCat || 'ALL',
-              availableQuantity: 50,
-              maxQuantity: 50,
-              orderingDeadline: '08:30',
-              isActive: true,
-              updatedAt: now,
-            },
-          })
-        );
-      }
-    }
-
-    await Promise.all(updatePromises);
-
-    // Record authoritative publication in menu_publishes collection
     try {
       const { recordMenuPublication } = await import('@/lib/menu-schedule');
-      await recordMenuPublication(date, selectedMealIds);
+      await recordMenuPublication(date, mealIds);
     } catch (e) {
-      console.error('Failed to record menu publication:', e);
+      console.error('Failed to record menu publication:', e instanceof Error ? e.name : e);
     }
 
-    // Invalidate menu cache and notify live sync system so parents immediately see updated menu
-    try {
-      const { clearMenuCache } = await import('@/app/api/menu/route');
-      clearMenuCache();
-    } catch {
-      // ignore
-    }
-
-    try {
-      const { notifyMenuUpdated } = await import('@/lib/sync-events');
-      await notifyMenuUpdated();
-    } catch {
-      // ignore
-    }
-
-    const updatedMenus = await prisma.menu.findMany({
-      where: { date },
-      include: { meal: true },
-    });
-
-    return NextResponse.json({
-      success: true,
-      message: `Menu for ${date} published successfully with ${selectedMealIds.length} active items.`,
-      menus: updatedMenus,
-      publishedCount: selectedMealIds.length,
-    });
+    return NextResponse.json({ ...result.body, publishedCount: mealIds.length });
   } catch (error) {
-    console.error('Error publishing menu:', error);
+    console.error('Error publishing menu:', error instanceof Error ? error.name : 'UnknownError');
     return NextResponse.json({ error: 'Failed to publish menu' }, { status: 500 });
   }
 }

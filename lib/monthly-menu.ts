@@ -1,7 +1,11 @@
 import crypto from 'crypto';
 import type { Firestore } from 'firebase-admin/firestore';
 import { db } from './firebase-admin';
-import { categoryMenuDocId } from './menu-stock';
+import { categoryMenuDocId, normalizeStudentCategory } from './menu-stock';
+import { isLiveMenuEntry, menuEntryAppliesTo, rankMenuEntries, type MenuEntryLike } from './menu-entries';
+
+type StoredMenu = MenuEntryLike & { id: string; holidayReason?: string | null };
+type StoredOrderItem = { menuId?: string; mealId?: string; studentCategory?: string | null };
 import { getTodayString, APP_TIMEZONE } from './utils';
 import type { XlsxSheet } from './xlsx-reader';
 
@@ -217,6 +221,8 @@ export type CellOutcome =
   | 'replace'
   | 'conflict-has-orders'
   | 'conflict-differs'
+  /** The current dish is one entry shared by all categories; it can only be replaced for all of them at once. */
+  | 'conflict-shared'
   | 'skip-past'
   | 'skip-blank'
   | 'skip-error';
@@ -321,10 +327,52 @@ export async function applyMonthlyMenu(
     }
   }
 
+  // Stored menus and order lines per date, read once each.
+  const menusByDate = new Map<string, StoredMenu[]>();
+  const menusOn = async (date: string) => {
+    if (!menusByDate.has(date)) {
+      const snap = await firestore.collection('menus').where('date', '==', date).get();
+      menusByDate.set(date, snap.docs.map((d) => ({ ...(d.data() as MenuEntryLike), id: d.id })));
+    }
+    return menusByDate.get(date)!;
+  };
+  const orderItemsByDate = new Map<string, StoredOrderItem[]>();
+  const orderItemsOn = async (date: string) => {
+    if (!orderItemsByDate.has(date)) {
+      const snap = await firestore.collection('orderItems').where('date', '==', date).get();
+      orderItemsByDate.set(date, snap.docs.map((d) => d.data() as StoredOrderItem));
+    }
+    return orderItemsByDate.get(date)!;
+  };
+
   // Menus per date and category, compared with what is already stored.
-  const counts = { create: 0, unchanged: 0, replace: 0, 'conflict-has-orders': 0, 'conflict-differs': 0, 'skip-past': 0, 'skip-blank': 0, 'skip-error': 0 } as Record<CellOutcome, number>;
+  const counts = { create: 0, unchanged: 0, replace: 0, 'conflict-has-orders': 0, 'conflict-differs': 0, 'conflict-shared': 0, 'skip-past': 0, 'skip-blank': 0, 'skip-error': 0 } as Record<CellOutcome, number>;
   const writes: Array<{ id: string; data: Record<string, unknown> }> = [];
+  // Other live entries for the same date and category (any ID scheme) switched off by a replace.
+  const deactivations = new Map<string, Record<string, unknown>>();
+  // Switched-off entries for the same dish, switched back on in place (ID, stock and orders kept).
+  const reactivations = new Map<string, Record<string, unknown>>();
   const resultDays: ImportResult['days'] = [];
+  const keptVia: Array<{ cat: StudentCategory; entryId: string; entry: { id: string; data: Record<string, unknown> } }> = [];
+  const standardEntry = (date: string, cat: StudentCategory, desired: { mealId: string; isHoliday: boolean; holidayReason: string | null }) => {
+    const id = categoryMenuDocId(date, cat);
+    return {
+      id,
+      data: {
+        id,
+        date,
+        studentCategory: cat,
+        ...desired,
+        availableQuantity: desired.isHoliday ? 0 : 50,
+        maxQuantity: 50,
+        orderingDeadline: '08:30',
+        isActive: !desired.isHoliday,
+        source: 'monthly-import',
+        createdAt: now,
+        updatedAt: now,
+      },
+    };
+  };
 
   for (const day of plan.days) {
     const resultCells = {} as ImportResult['days'][number]['cells'];
@@ -336,53 +384,75 @@ export async function applyMonthlyMenu(
       else if (cell.kind === 'BLANK') outcome = 'skip-blank';
       else if (day.date < todayStr) outcome = 'skip-past';
       else {
-        const id = categoryMenuDocId(day.date, cat);
-        const snap = await firestore.collection('menus').doc(id).get();
+        const date = day.date;
+        const id = categoryMenuDocId(date, cat);
+        const dayMenus = await menusOn(date);
         const desired =
           cell.kind === 'MEAL'
             ? { mealId: dishes.get(dishKey(cell.dish))!.mealId, isHoliday: false, holidayReason: null }
             : { mealId: '', isHoliday: true, holidayReason: cell.reason };
-        if (!snap.exists) {
+        const matches = (m: StoredMenu) =>
+          String(m.mealId || '') === desired.mealId &&
+          Boolean(m.isHoliday) === desired.isHoliday &&
+          (m.holidayReason || null) === (desired.holidayReason || null);
+        const nameOf = (m: StoredMenu) =>
+          m.isHoliday ? m.holidayReason || 'Holiday' : mealsSnap.docs.find((d) => d.id === m.mealId)?.data()?.name || m.mealId || null;
+
+        // Every entry that currently applies to this date and category, whichever tool created it.
+        const live = rankMenuEntries(dayMenus, date, cat);
+        const standard = dayMenus.find((m) => m.id === id);
+        const current = live[0] ?? standard;
+        if (!current) {
           outcome = 'create';
         } else {
-          const current = snap.data() || {};
-          existingMealName = current.mealId ? mealsSnap.docs.find((d) => d.id === current.mealId)?.data()?.name || current.mealId : null;
-          const same =
-            String(current.mealId || '') === desired.mealId &&
-            Boolean(current.isHoliday) === desired.isHoliday &&
-            (current.holidayReason || null) === (desired.holidayReason || null);
-          if (same) outcome = 'unchanged';
-          else {
-            const ordered = await firestore.collection('orderItems').where('date', '==', day.date).get();
-            const hasOrders = ordered.docs.some((d) => {
-              const it = d.data();
-              return it.menuId === id || (current.mealId && it.mealId === current.mealId && (!it.studentCategory || it.studentCategory === cat));
-            });
-            outcome = hasOrders ? 'conflict-has-orders' : options.replaceUnordered ? 'replace' : 'conflict-differs';
+          existingMealName = nameOf(current);
+          if (matches(current) && isLiveMenuEntry(current)) {
+            // Already on the menu (also when an older tool created the entry: its ID, stock and orders stay).
+            outcome = 'unchanged';
+          } else if (matches(current)) {
+            // Same dish, but switched off: switching it back on needs the same confirmation as a replace.
+            if (!options.replaceUnordered) outcome = 'conflict-differs';
+            else {
+              outcome = 'replace';
+              reactivations.set(current.id, { isActive: true, updatedAt: now });
+            }
+          } else {
+            const differing = live.filter((m) => !matches(m));
+            if (standard && !matches(standard) && !differing.includes(standard)) differing.push(standard);
+            const ordered = await orderItemsOn(date);
+            const hasOrders = differing.some((m) =>
+              ordered.some((it) => it.menuId === m.id || (m.mealId && it.mealId === m.mealId && menuEntryAppliesTo(m, it.studentCategory || cat)))
+            );
+            // One entry shared by all categories can only be retired when every category of the day is set here.
+            const shared = differing.some((m) => normalizeStudentCategory(m.studentCategory) === 'ALL');
+            const wholeDay = STUDENT_CATEGORIES.every((c) => day.cells[c].kind === 'MEAL' || day.cells[c].kind === 'HOLIDAY');
+            if (hasOrders) outcome = 'conflict-has-orders';
+            else if (shared && !wholeDay) outcome = 'conflict-shared';
+            else if (!options.replaceUnordered) outcome = 'conflict-differs';
+            else {
+              outcome = 'replace';
+              for (const m of differing) {
+                if (m.id !== id) deactivations.set(m.id, { isActive: false, replacedBy: id, updatedAt: now });
+              }
+            }
           }
         }
-        if (outcome === 'create' || outcome === 'replace') {
-          writes.push({
-            id,
-            data: {
-              id,
-              date: day.date,
-              studentCategory: cat,
-              ...desired,
-              availableQuantity: desired.isHoliday ? 0 : 50,
-              maxQuantity: 50,
-              orderingDeadline: '08:30',
-              isActive: !desired.isHoliday,
-              source: 'monthly-import',
-              createdAt: now,
-              updatedAt: now,
-            },
-          });
-        }
+        if ((outcome === 'create' || outcome === 'replace') && !(current && reactivations.has(current.id))) writes.push(standardEntry(date, cat, desired));
+        else if (outcome === 'unchanged' && current && current.id !== id) keptVia.push({ cat, entryId: current.id, entry: standardEntry(date, cat, desired) });
       }
       counts[outcome]++;
       resultCells[cat] = { ...cell, outcome, existingMealName } as any;
     }
+    // A shared entry retired by another category's replace: categories that were served by it
+    // (same dish) get their own standard entry, so no category of the day is left without a menu.
+    for (const kept of keptVia) {
+      if (!deactivations.has(kept.entryId)) continue;
+      writes.push(kept.entry);
+      counts.unchanged--;
+      counts.replace++;
+      resultCells[kept.cat] = { ...resultCells[kept.cat], outcome: 'replace' };
+    }
+    keptVia.length = 0;
     resultDays.push({ row: day.row, date: day.date, dayLabel: day.dayLabel, weekday: day.weekday, errors: day.errors, cells: resultCells });
   }
 
@@ -396,6 +466,13 @@ export async function applyMonthlyMenu(
             : `${counts[c]} existing menu entr${counts[c] === 1 ? 'y differs' : 'ies differ'} from the sheet (no orders yet). Choose "replace" to update them.`,
       });
     }
+  }
+
+  if (counts['conflict-shared'] > 0) {
+    issues.push({
+      severity: 'warning',
+      message: `${counts['conflict-shared']} menu entr${counts['conflict-shared'] === 1 ? 'y is' : 'ies are'} one dish shared by all categories; it can only be replaced when every category is set for that day. Kept as it is.`,
+    });
   }
 
   const dishList = Array.from(dishes.values());
@@ -446,6 +523,9 @@ export async function applyMonthlyMenu(
     }
   }
   for (const w of writes) ops.push((batch) => batch.set(firestore.collection('menus').doc(w.id), w.data));
+  for (const [menuId, data] of [...deactivations, ...reactivations]) {
+    ops.push((batch) => batch.set(firestore.collection('menus').doc(menuId), data, { merge: true }));
+  }
 
   const touchedDates = Array.from(new Set(writes.map((w) => String(w.data.date))));
   for (const date of touchedDates) {

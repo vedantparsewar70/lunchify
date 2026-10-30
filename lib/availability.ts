@@ -1,5 +1,6 @@
 import prisma from '@/lib/prisma';
 import { isDeadlinePassed, APP_TIMEZONE, getTodayString } from '@/lib/utils';
+import { effectiveMenuEntry } from '@/lib/menu-entries';
 
 export interface MealItemAvailability {
   mealId: string;
@@ -191,11 +192,14 @@ export async function validateCartAvailability(
     }
 
     // Strictly match category-specific menu or universal 'ALL' menu record
-    const menuRecord = dateMenuRecords.find((m: any) => {
+    let menuRecord = dateMenuRecords.find((m: any) => {
       if (m.mealId !== item.mealId || m.date !== item.date) return false;
       const mCat = normalizeCat(m.studentCategory);
       return mCat === 'ALL' || itemCat === 'ALL' || mCat === itemCat;
     });
+    // One dish per date and category: only the entry the parent menu shows can be ordered.
+    const effective = itemCat === 'ALL' ? null : effectiveMenuEntry(dateMenuRecords, item.date, itemCat);
+    if (effective) menuRecord = effective.mealId === item.mealId ? effective : undefined;
 
     if (!menuRecord || !menuRecord.isActive) {
       itemResults.push({

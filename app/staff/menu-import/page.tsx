@@ -5,7 +5,7 @@ import Link from 'next/link';
 import { AlertTriangle, ArrowLeft, CalendarDays, CheckCircle2, FileSpreadsheet, Loader2, Upload } from 'lucide-react';
 import { formatDatePretty } from '@/lib/utils';
 
-type Outcome = 'create' | 'unchanged' | 'replace' | 'conflict-has-orders' | 'conflict-differs' | 'skip-past' | 'skip-blank' | 'skip-error';
+type Outcome = 'create' | 'unchanged' | 'replace' | 'conflict-has-orders' | 'conflict-differs' | 'conflict-shared' | 'skip-past' | 'skip-blank' | 'skip-error';
 
 interface DishDecision {
   price: string;
@@ -22,6 +22,7 @@ const OUTCOME_LABEL: Record<Outcome, string> = {
   replace: 'Will replace',
   'conflict-has-orders': 'Kept (has orders)',
   'conflict-differs': 'Different from saved',
+  'conflict-shared': 'Kept (one dish for all classes)',
   'skip-past': 'Past date',
   'skip-blank': 'Empty — not bookable',
   'skip-error': 'Error',

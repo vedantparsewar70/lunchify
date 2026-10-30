@@ -3,6 +3,7 @@ import prisma from '@/lib/prisma';
 import { getCurrentUser } from '@/lib/auth';
 
 import { getStudentCategory } from '@/lib/october-2026-timetable';
+import { effectiveEntries, publishDish, withdrawDish } from '@/lib/menu-publish';
 
 /** Portions must be whole numbers from 0 to 10,000; anything else is rejected, never stored as NaN. */
 function invalidQuantity(...values: unknown[]): boolean {
@@ -60,37 +61,25 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'Quantity must be a whole number between 0 and 10000' }, { status: 400 });
     }
 
-    // Upsert menu item for this meal & date. Re-scheduling an existing menu keeps its remaining
-    // stock (already reduced by orders) unless a quantity is explicitly supplied.
-    const menu = await prisma.menu.upsert({
-      where: {
-        mealId_date: {
-          mealId,
-          date,
-        },
-      },
-      update: {
-        ...(availableQuantity !== undefined ? { availableQuantity: Number(availableQuantity) } : {}),
-        ...(maxQuantity !== undefined ? { maxQuantity: Number(maxQuantity) } : {}),
-        orderingDeadline: orderingDeadline || '08:30',
-        isActive: true,
-      },
-      create: {
-        mealId,
-        date,
-        availableQuantity: Number(availableQuantity ?? 50),
-        maxQuantity: Number(maxQuantity ?? 50),
-        orderingDeadline: orderingDeadline || '08:30',
-        isActive: true,
-      },
-      include: { meal: true },
-    });
+    // Same rules as every other menu tool: one dish per date and category (lib/menu-publish.ts).
+    // Re-scheduling a dish that is already on the menu keeps its entry and remaining stock unless a
+    // quantity is explicitly supplied.
+    const target = body.studentCategory || body.category;
+    const cat = !target || target === 'ALL' ? 'ALL' : getStudentCategory(undefined, String(target));
+    const published = await publishDish({ date, studentCategory: cat, mealId, replace: body.replace, actorId: user.id });
+    if (published.status !== 200) return NextResponse.json(published.body, { status: published.status });
 
-    try {
-      const { notifyMenuUpdated } = await import('@/lib/sync-events');
-      await notifyMenuUpdated();
-    } catch {
-      // non-blocking
+    const entryIds = await effectiveEntries(date, cat);
+    const edits = {
+      ...(availableQuantity !== undefined ? { availableQuantity: Number(availableQuantity) } : {}),
+      ...(maxQuantity !== undefined ? { maxQuantity: Number(maxQuantity) } : {}),
+      ...(body.orderingDeadline !== undefined ? { orderingDeadline: orderingDeadline || '08:30' } : {}),
+    };
+    let menu = null;
+    for (const id of entryIds) {
+      menu = Object.keys(edits).length
+        ? await prisma.menu.update({ where: { id }, data: edits, include: { meal: true } })
+        : await prisma.menu.findUnique({ where: { id }, include: { meal: true } });
     }
 
     return NextResponse.json({ success: true, menu }, { status: 201 });
@@ -100,84 +89,33 @@ export async function POST(req: Request) {
   }
 }
 
-async function handleBatchPublish(date: string, selectedMealIds: string[]) {
-  // 1. Fetch all existing menus for this date
-  const existingMenus = await prisma.menu.findMany({
-    where: { date },
-  });
-
-  const existingMealIdMap = new Map(existingMenus.map((m: any) => [m.mealId, m]));
-
-  const now = new Date().toISOString();
-
-  // 2. Enable selected meals (upserting if not yet in database for that date)
-  for (const mealId of selectedMealIds) {
-    const existing = existingMealIdMap.get(mealId);
-    if (existing) {
-      await prisma.menu.update({
-        where: { id: existing.id },
-        data: { isActive: true, updatedAt: now },
-      });
-    } else {
-      await prisma.menu.upsert({
-        where: {
-          mealId_date: { mealId, date },
-        },
-        update: { isActive: true, updatedAt: now },
-        create: {
-          mealId,
-          date,
-          availableQuantity: 50,
-          maxQuantity: 50,
-          orderingDeadline: '08:30',
-          isActive: true,
-          updatedAt: now,
-        },
-      });
-    }
+/** Older batch publish (PATCH, and PUT with selectedMealIds): one dish for all categories, or none. */
+async function handleBatchPublish(date: string, selectedMealIds: string[], actorId: string, replace?: unknown) {
+  const mealIds = Array.from(new Set(selectedMealIds.filter((id) => typeof id === 'string' && id)));
+  if (mealIds.length > 1) {
+    return NextResponse.json(
+      { error: 'Each class category has one dish per day. Select exactly one dish to publish.', code: 'ONE_DISH_PER_DAY' },
+      { status: 400 }
+    );
   }
-
-  // 3. Disable any menu items for this date that are NOT in selectedMealIds
-  for (const existing of existingMenus) {
-    if (!selectedMealIds.includes(existing.mealId)) {
-      await prisma.menu.update({
-        where: { id: existing.id },
-        data: { isActive: false, updatedAt: now },
-      });
-    }
-  }
+  const result =
+    mealIds.length === 1
+      ? await publishDish({ date, studentCategory: 'ALL', mealId: mealIds[0], replace, actorId })
+      : await withdrawDish({ date, studentCategory: 'ALL', actorId });
+  if (result.status !== 200) return NextResponse.json(result.body, { status: result.status });
 
   try {
     const { recordMenuPublication } = await import('@/lib/menu-schedule');
-    await recordMenuPublication(date, selectedMealIds);
+    await recordMenuPublication(date, mealIds);
   } catch (e) {
-    console.error('Failed to record publication in handleBatchPublish:', e);
-  }
-
-  try {
-    const { clearMenuCache } = await import('@/app/api/menu/route');
-    clearMenuCache();
-  } catch {
-    // ignore
-  }
-
-  try {
-    const { notifyMenuUpdated } = await import('@/lib/sync-events');
-    await notifyMenuUpdated();
-  } catch {
-    // ignore
+    console.error('Failed to record publication in handleBatchPublish:', e instanceof Error ? e.name : e);
   }
 
   const updatedMenus = await prisma.menu.findMany({
     where: { date },
     include: { meal: true },
   });
-
-  return NextResponse.json({
-    success: true,
-    message: `Menu for ${date} published successfully with ${selectedMealIds.length} active items.`,
-    menus: updatedMenus,
-  });
+  return NextResponse.json({ ...result.body, menus: updatedMenus });
 }
 
 export async function PUT(req: Request) {
@@ -195,7 +133,7 @@ export async function PUT(req: Request) {
       if (user.role !== 'ADMIN') {
         return NextResponse.json({ error: 'Unauthorized: Admin access required' }, { status: 403 });
       }
-      return await handleBatchPublish(date, selectedMealIds);
+      return await handleBatchPublish(date, selectedMealIds, user.id, body.replace);
     }
 
     if (!id) {
@@ -274,7 +212,7 @@ export async function PATCH(req: Request) {
       return NextResponse.json({ error: 'Date and selectedMealIds array are required' }, { status: 400 });
     }
 
-    return await handleBatchPublish(date, selectedMealIds);
+    return await handleBatchPublish(date, selectedMealIds, user.id, body.replace);
   } catch (error) {
     console.error('Error publishing menu:', error);
     return NextResponse.json({ error: 'Failed to publish menu' }, { status: 500 });
